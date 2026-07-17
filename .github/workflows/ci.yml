@@ -1,0 +1,38 @@
+# Runs the Swift build and the validation test suite on every push/PR.
+#
+# Scope: `swift test` re-runs the diff against the CHECKED-IN reference JSONs
+# (Tests/SwiftPowerSolverTests/Reference/*.json) — a frozen pandapower
+# snapshot. It does NOT run Tools/dump_reference.py or pandapower, so a green
+# badge means "the Swift solver still matches the recorded pandapower results",
+# not a live re-comparison against pandapower. Regenerating the references
+# stays a deliberate manual step.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: swift build & test (validation harness)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build -v
+
+      - name: Test (pandapower reference diff, no Python needed)
+        run: swift test -v
