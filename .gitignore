@@ -1,0 +1,16 @@
+# Swift / SPM
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Python tooling
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
