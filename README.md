@@ -1,5 +1,7 @@
 # SwiftPowerSolver
 
+[![CI](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml/badge.svg)](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml)
+
 A native Swift AC power flow core: Ybus assembly and polar Newton-Raphson
 power flow, built on Apple's Accelerate framework (sparse QR each iteration).
 Runs on macOS 14+ and iOS 17+ with no third-party dependencies.
