@@ -155,6 +155,23 @@ def dump_solution(net) -> dict:
     }
 
 
+def dump_dc(net) -> dict:
+    """Result-side ppc data after rundcpp: bus angles and DC branch P (both
+    ends). DC is flat-voltage/lossless, so vm is 1.0 and Q is 0 — the Piece-2
+    oracle only compares angles and branch P."""
+    ppc = net._ppc
+    va = [float(row[VA]) for row in ppc["bus"]]
+    pf = [float(row[PF].real) for row in ppc["branch"]]
+    pt = [float(row[PT].real) for row in ppc["branch"]]
+    if not all(np.isfinite(va)) or not all(np.isfinite(pf)):
+        raise AssertionError("rundcpp did not populate ppc VA / branch PF")
+    return {
+        "va_deg": va,
+        "branch_p_from_mw": pf,
+        "branch_p_to_mw": pt,
+    }
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -175,6 +192,14 @@ def dump_case(name: str, make_net) -> dict:
     solutions["q_lims"] = dump_solution(net_q)
 
     doc["solutions"] = solutions
+
+    # Run 3: DC power flow (Piece 2 oracle). Additive — the AC keys above are
+    # untouched. Same ppc-level, identity-mapped dump as the AC runs.
+    net_dc = make_net()
+    pp.rundcpp(net_dc)
+    _check_ppc_is_identity_mapped(net_dc)
+    doc["dc"] = dump_dc(net_dc)
+
     return doc
 
 
@@ -189,7 +214,7 @@ def main() -> None:
         nnz = len(doc["ybus"]["g"])
         it = doc["solutions"]["default"]["iterations"]
         print(f"{name}: {nb} buses, {nbr} branches, Ybus nnz={nnz}, "
-              f"NR iterations={it} -> {out.relative_to(HERE.parent)}")
+              f"NR iterations={it}, DC dumped -> {out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":
