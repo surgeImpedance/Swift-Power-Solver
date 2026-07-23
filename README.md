@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml/badge.svg)](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml)
 
-A native Swift AC power flow core: Ybus assembly and polar Newton-Raphson
-power flow, built on Apple's Accelerate framework (sparse QR each iteration).
+A native Swift power flow core: Ybus assembly, polar Newton-Raphson AC power
+flow, and DC power flow, built on Apple's Accelerate framework (sparse solves).
 Runs on macOS 14+ and iOS 17+ with no third-party dependencies.
 
 **Validated against [pandapower](https://www.pandapower.org) at machine
@@ -35,9 +35,16 @@ extracted from a substation simulator that does exactly that.)
   linear solve via Accelerate, generator reactive limits (PV→PQ switching,
   matching pandapower `enforce_q_lims`), multiple slack buses, non-zero slack
   reference angles, de-energized island handling (NaN voltages).
-- **Planned**: DC power flow, N-1 contingency screening, short-circuit — all
-  consuming the same `BusBranchNetwork` and Ybus. This is an early,
-  piece-by-piece project; every piece lands with its oracle tests.
+- **Piece 2 — DC power flow** (`DCPowerFlowSolver`): MATPOWER `makeBdc`
+  formulation (B′ = 1/(x·tap), phase-shift injections, bus shunts), a single
+  Accelerate sparse solve reusing the AC path's linear solver. Shares the AC
+  solver's slack / classification / island conventions and returns the same
+  `PowerFlowSolution` (flat voltage, P-only flows), so AC and DC results are
+  directly comparable on the same network.
+- **Planned**: N-1 contingency screening (PTDF/LODF — the DC solver already
+  marks the plug points), short-circuit — all consuming the same
+  `BusBranchNetwork` and Ybus. This is an early, piece-by-piece project;
+  every piece lands with its oracle tests.
 
 ## Validation results
 
@@ -52,6 +59,16 @@ tolerances; actual agreement is machine precision:
 | IEEE NR, with and without Q-limits | Va | 2.1e-12 rad |
 | IEEE NR | branch P/Q flows | 2.7e-09 MVA |
 | case118 with Q-limits | pinned-generator set | exact match (6 gens) |
+| IEEE 14/39/118 DC vs `rundcpp` | bus angle Va | 7.3e-15 rad |
+| IEEE 14/39/118 DC vs `rundcpp` | branch P flow | 3.9e-12 MW |
+
+DC agreement per case (angle Va / branch P), against pandapower `rundcpp`:
+
+| Case | Max \|ΔVa\| | Max \|ΔP\| |
+|---|---|---|
+| case14 | 9.4e-16 rad | 2.8e-13 MW |
+| case39 | 2.3e-15 rad | 3.9e-12 MW |
+| case118 (30° slack + taps) | 7.3e-15 rad | 3.9e-12 MW |
 
 ## Usage
 
@@ -113,8 +130,9 @@ fails loudly if a pandapower upgrade ever changes them.
 
 - The complex number type is named `ComplexD` to avoid colliding with
   `Complex` from swift-numerics in consuming projects.
-- `PowerFlowSolver` is a protocol; future solvers (DC power flow) will be
-  additional conformances over the same network type.
+- `PowerFlowSolver` is a protocol with two conformers today,
+  `NewtonRaphsonSolver` (AC) and `DCPowerFlowSolver` (DC), over the same
+  network type; further solvers plug in the same way.
 
 ## License
 

@@ -74,6 +74,14 @@ struct ReferenceCase: Decodable {
         }
     }
 
+    // Piece 2 oracle: pandapower rundcpp results. Optional so pre-DC reference
+    // JSONs (and the AC-only tests) keep decoding unchanged.
+    struct RefDC: Decodable {
+        var vaDeg: [Double]
+        var branchPFromMw: [Double]
+        var branchPToMw: [Double]
+    }
+
     var name: String
     var pandapowerVersion: String
     var baseMva: Double
@@ -82,6 +90,7 @@ struct ReferenceCase: Decodable {
     var gens: [RefGen]
     var ybus: RefYbus
     var solutions: Solutions
+    var dc: RefDC?
 
     /// Load `<name>.json` from the bundled Reference directory.
     static func load(_ name: String) throws -> ReferenceCase {
