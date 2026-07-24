@@ -82,6 +82,23 @@ struct ReferenceCase: Decodable {
         var branchPToMw: [Double]
     }
 
+    // Piece 3 oracle: pandapower makeLODF columns + post-contingency DC flows
+    // from a real re-solve. Optional, same additive pattern as `dc`.
+    struct RefContingency: Decodable {
+        struct Outage: Decodable {
+            var branch: Int
+            var islands: Bool
+            /// Column k of pandapower's LODF; nil for islanding outages, where
+            /// pypower emits inf/nan (see DistributionFactors.isIslanding).
+            var lodfColumn: [Double?]?
+            /// Post-contingency branch P from a rundcpp re-solve; entries are
+            /// nil where pandapower reports NaN (buses stranded by the outage).
+            var postPFromMw: [Double?]
+        }
+        var islandingBranches: [Int]
+        var outages: [Outage]
+    }
+
     var name: String
     var pandapowerVersion: String
     var baseMva: Double
@@ -91,6 +108,7 @@ struct ReferenceCase: Decodable {
     var ybus: RefYbus
     var solutions: Solutions
     var dc: RefDC?
+    var contingency: RefContingency?
 
     /// Load `<name>.json` from the bundled Reference directory.
     static func load(_ name: String) throws -> ReferenceCase {

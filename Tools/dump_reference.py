@@ -36,6 +36,8 @@ from pandapower.pypower.idx_brch import (
     F_BUS, T_BUS, BR_R, BR_X, BR_B, BR_G, TAP, SHIFT, BR_STATUS, PF, QF, PT, QT,
     BR_R_ASYM, BR_X_ASYM, BR_G_ASYM, BR_B_ASYM,
 )
+from pandapower.pypower.makePTDF import makePTDF
+from pandapower.pypower.makeLODF import makeLODF
 
 HERE = pathlib.Path(__file__).resolve().parent
 OUT_DIR = HERE.parent / "Tests" / "SwiftPowerSolverTests" / "Reference"
@@ -172,6 +174,97 @@ def dump_dc(net) -> dict:
     }
 
 
+def _islanding_outages(ppc) -> set:
+    """Branch indices whose outage disconnects the network (graph bridges,
+    counting parallel branches as non-bridges)."""
+    import networkx as nx
+    nb = len(ppc["bus"])
+    ends = [(int(row[F_BUS].real), int(row[T_BUS].real)) for row in ppc["branch"]]
+    g = nx.Graph()
+    g.add_nodes_from(range(nb))
+    for f, t in ends:
+        g.add_edge(f, t)
+    bridges = set()
+    for u, v in nx.bridges(g):
+        keys = [k for k, (f, t) in enumerate(ends) if {f, t} == {u, v}]
+        if len(keys) == 1:          # a parallel pair is not a bridge
+            bridges.add(keys[0])
+    return bridges
+
+
+def _outage_selection(name: str, ppc) -> list:
+    """Which outages to dump, deterministically.
+
+    case14 / case39: every branch (exhaustive).
+    case118: a documented subset — ALL islanding branches plus every 8th
+    branch index — so the reference stays small while still covering scale,
+    off-nominal taps and the non-zero slack angle. Regenerating this script
+    reproduces exactly the same set.
+    """
+    nbr = len(ppc["branch"])
+    islanding = _islanding_outages(ppc)
+    if name == "case118":
+        return sorted(islanding | set(range(0, nbr, 8)))
+    return list(range(nbr))
+
+
+def dump_contingency(net, name: str) -> dict:
+    """Piece-3 oracle. Per selected outage, two independent references:
+
+    1. `lodf_column`: column k of pandapower's own makeLODF matrix — the
+       redistribution factors for outaging branch k. For islanding outages
+       pypower divides by (1 - h) with h = 1 and emits inf/nan; those are
+       dumped as null so the Swift side asserts its own `islandsNetwork`
+       classification instead of matching garbage.
+    2. `post_p_from_mw`: post-contingency DC branch flows from a real
+       re-solve (rundcpp with the branch out of service) — validates the end
+       result, not just the intermediate matrix.
+
+    Only the `_outage_selection` columns are dumped (all branches for
+    case14/case39, the documented subset for case118) so the checked-in
+    references stay small enough to keep a bare clone cheap.
+    """
+    import copy
+
+    ppc = net._ppc
+    H = makePTDF(ppc["baseMVA"], ppc["bus"], ppc["branch"])
+    L = makeLODF(ppc["branch"], H)
+    islanding = _islanding_outages(ppc)
+    nbr = len(ppc["branch"])
+
+    selection = _outage_selection(name, ppc)
+    nl = len(net.line)
+    outages = []
+    for k in selection:
+        islands = bool(k in islanding)
+        column = None
+        if not islands:
+            column = [None if not np.isfinite(L[m, k]) else float(L[m, k])
+                      for m in range(nbr)]
+
+        # ppc branch order is lines first, then transformers.
+        net_k = copy.deepcopy(net)
+        if k < nl:
+            net_k.line.loc[net_k.line.index[k], "in_service"] = False
+        else:
+            net_k.trafo.loc[net_k.trafo.index[k - nl], "in_service"] = False
+        pp.rundcpp(net_k)
+        pk = net_k._ppc["branch"][:, PF]
+
+        outages.append({
+            "branch": int(k),
+            "islands": islands,
+            "lodf_column": column,
+            "post_p_from_mw": [None if not np.isfinite(v.real) else float(v.real)
+                               for v in pk],
+        })
+
+    return {
+        "islanding_branches": sorted(int(k) for k in islanding),
+        "outages": outages,
+    }
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -200,6 +293,10 @@ def dump_case(name: str, make_net) -> dict:
     _check_ppc_is_identity_mapped(net_dc)
     doc["dc"] = dump_dc(net_dc)
 
+    # Run 4: N-1 contingency (Piece 3 oracle) — LODF plus post-contingency DC
+    # flows from repeated rundcpp. Additive; the AC/DC keys above are untouched.
+    doc["contingency"] = dump_contingency(net_dc, name)
+
     return doc
 
 
@@ -213,8 +310,11 @@ def main() -> None:
         nbr = len(doc["branches"])
         nnz = len(doc["ybus"]["g"])
         it = doc["solutions"]["default"]["iterations"]
+        cg = doc["contingency"]
         print(f"{name}: {nb} buses, {nbr} branches, Ybus nnz={nnz}, "
-              f"NR iterations={it}, DC dumped -> {out.relative_to(HERE.parent)}")
+              f"NR iterations={it}, DC dumped, "
+              f"{len(cg['outages'])} outages ({len(cg['islanding_branches'])} islanding) "
+              f"-> {out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":
