@@ -3,8 +3,9 @@
 [![CI](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml/badge.svg)](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml)
 
 A native Swift power flow core: Ybus assembly, polar Newton-Raphson AC power
-flow, and DC power flow, built on Apple's Accelerate framework (sparse solves).
-Runs on macOS 14+ and iOS 17+ with no third-party dependencies.
+flow, DC power flow, and N-1 thermal contingency screening (PTDF/LODF), built
+on Apple's Accelerate framework (sparse solves). Runs on macOS 14+ and iOS 17+
+with no third-party dependencies.
 
 **Validated against [pandapower](https://www.pandapower.org) at machine
 precision** on the IEEE 14, 39, and 118 bus systems — the validation harness
@@ -41,8 +42,15 @@ extracted from a substation simulator that does exactly that.)
   solver's slack / classification / island conventions and returns the same
   `PowerFlowSolution` (flat voltage, P-only flows), so AC and DC results are
   directly comparable on the same network.
-- **Planned**: N-1 contingency screening (PTDF/LODF — the DC solver already
-  marks the plug points), short-circuit — all consuming the same
+- **Piece 3 — N-1 thermal contingency** (`DistributionFactors`,
+  `N1ContingencyAnalyzer`): PTDF (`Bf·Bbus⁻¹`) and LODF built on the DC model,
+  post-contingency flows `P_post = P_pre + LODF·P_pre` for every single-branch
+  outage, and violations against branch thermal ratings. Outages that
+  disconnect the network are classified as islanding rather than producing the
+  `inf`/`nan` that the textbook formula yields there. Results are structured
+  data (flows, loadings, outcomes) for the application to render.
+- **Planned**: short-circuit, and multi-element / generator contingencies (the
+  contingency code marks those plug points) — all consuming the same
   `BusBranchNetwork` and Ybus. This is an early, piece-by-piece project;
   every piece lands with its oracle tests.
 
@@ -61,6 +69,8 @@ tolerances; actual agreement is machine precision:
 | case118 with Q-limits | pinned-generator set | exact match (6 gens) |
 | IEEE 14/39/118 DC vs `rundcpp` | bus angle Va | 7.3e-15 rad |
 | IEEE 14/39/118 DC vs `rundcpp` | branch P flow | 3.9e-12 MW |
+| IEEE 14/39/118 LODF vs `makeLODF` | outage distribution factor | 5.0e-14 |
+| IEEE 14/39/118 N-1 vs repeated `rundcpp` | post-contingency P | 1.5e-11 MW |
 
 DC agreement per case (angle Va / branch P), against pandapower `rundcpp`:
 
@@ -69,6 +79,22 @@ DC agreement per case (angle Va / branch P), against pandapower `rundcpp`:
 | case14 | 9.4e-16 rad | 2.8e-13 MW |
 | case39 | 2.3e-15 rad | 3.9e-12 MW |
 | case118 (30° slack + taps) | 7.3e-15 rad | 3.9e-12 MW |
+
+N-1 agreement per case. LODF is compared against pandapower's own
+`makeLODF`; post-contingency flows against a full DC re-solve (`rundcpp`
+with the branch out of service), which validates the result rather than just
+the intermediate matrix. Islanding outages are classified, not diffed —
+pypower emits `inf`/`nan` for those columns:
+
+| Case | Outages | Islanding | Max \|ΔLODF\| | Max \|ΔP\| post-contingency |
+|---|---|---|---|---|
+| case14 | 19 | 1 | 4.0e-15 | 4.8e-13 MW |
+| case39 | 35 | 11 | 5.0e-14 | 1.5e-11 MW |
+| case118 | 23 | 9 | 2.1e-14 | 5.4e-12 MW |
+
+A synthetic phase-shifter + off-nominal-tap network additionally checks LODF
+against a DC re-solve at **1.2e-15 pu** — a case the IEEE networks cannot
+cover, since none of them contains a phase shifter.
 
 ## Usage
 
@@ -82,7 +108,10 @@ let network = BusBranchNetwork(
         .init(type: .slack, baseKv: 110),
         .init(type: .pq, baseKv: 110, pLoadPu: 0.4, qLoadPu: 0.12),
     ],
-    branches: [.init(from: 0, to: 1, r: 0.01, x: 0.1, b: 0.04)],
+    // `ratingMva` is how a branch gets a thermal limit — N-1 screening reports
+    // violations only against rated branches. Unrated (nil) branches still get
+    // post-contingency flows, they are just never flagged.
+    branches: [.init(from: 0, to: 1, r: 0.01, x: 0.1, b: 0.04, ratingMva: 120)],
     generators: [.init(bus: 0, pPu: 0, vSetPu: 1.02)])
 
 var options = PowerFlowOptions()
@@ -94,6 +123,23 @@ if solution.converged {
     print(solution.branchFlows)               // per-branch P/Q at both ends
     print(solution.genPPu, solution.genQPu)   // dispatch incl. slack share
 }
+```
+
+N-1 thermal screening runs off a DC base solution:
+
+```swift
+let base = DCPowerFlowSolver().solve(network)
+let screening = N1ContingencyAnalyzer().screen(network, base: base)
+
+for result in screening.casesWithViolations {
+    print("outage", result.outagedBranch)
+    for v in result.violations {                 // worst loading first
+        print("  branch \(v.monitoredBranch) at \(v.loading * 100)% of \(v.ratingMva) MVA")
+    }
+}
+
+// Outages that split the network are reported, not silently wrong:
+let islanding = screening.cases.filter { $0.outcome == .islandsNetwork }
 ```
 
 `YbusBuilder.build(network)` is also public if you only need the admittance

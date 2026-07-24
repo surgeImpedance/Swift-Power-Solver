@@ -45,10 +45,13 @@ public struct BusBranchNetwork: Equatable, Sendable {
         public var tap: Double       // off-nominal ratio at the from side; 1 = none
         public var shiftRad: Double  // phase shift at the from side
         public var inService: Bool
+        /// Thermal rating, MVA. `nil` = unrated: contingency screening reports
+        /// flows for the branch but never a violation against it.
+        public var ratingMva: Double?
 
         public init(from: Int, to: Int, r: Double, x: Double, b: Double = 0,
                     g: Double = 0, tap: Double = 1.0, shiftRad: Double = 0,
-                    inService: Bool = true) {
+                    inService: Bool = true, ratingMva: Double? = nil) {
             self.from = from
             self.to = to
             self.r = r
@@ -58,6 +61,7 @@ public struct BusBranchNetwork: Equatable, Sendable {
             self.tap = tap
             self.shiftRad = shiftRad
             self.inService = inService
+            self.ratingMva = ratingMva
         }
     }
 
