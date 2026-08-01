@@ -13,6 +13,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:        # allow manual runs (e.g. a merge commit whose
+                            # push event did not auto-fire a run)
 
 concurrency:
   group: ci-${{ github.ref }}
