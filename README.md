@@ -3,9 +3,9 @@
 [![CI](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml/badge.svg)](https://github.com/surgeImpedance/Swift-Power-Solver/actions/workflows/ci.yml)
 
 A native Swift power flow core: Ybus assembly, polar Newton-Raphson AC power
-flow, DC power flow, and N-1 thermal contingency screening (PTDF/LODF), built
-on Apple's Accelerate framework (sparse solves). Runs on macOS 14+ and iOS 17+
-with no third-party dependencies.
+flow, DC power flow, N-1 thermal contingency screening (PTDF/LODF), and IEC
+60909 short-circuit calculation, built on Apple's Accelerate framework (sparse
+solves). Runs on macOS 14+ and iOS 17+ with no third-party dependencies.
 
 **Validated against [pandapower](https://www.pandapower.org) at machine
 precision** on the IEEE 14, 39, and 118 bus systems — the validation harness
@@ -49,10 +49,19 @@ extracted from a substation simulator that does exactly that.)
   disconnect the network are classified as islanding rather than producing the
   `inf`/`nan` that the textbook formula yields there. Results are structured
   data (flows, loadings, outcomes) for the application to render.
-- **Planned**: short-circuit, and multi-element / generator contingencies (the
-  contingency code marks those plug points) — all consuming the same
-  `BusBranchNetwork` and Ybus. This is an early, piece-by-piece project;
-  every piece lands with its oracle tests.
+- **Piece 4 — IEC 60909 short-circuit** (`ShortCircuitAnalyzer`): standardized
+  bus-fault currents — `Ik''` (initial symmetrical), `Skss`, `ip` (peak, via
+  the IEC method-C κ factor), and `Ith` (thermal), from the positive-sequence
+  fault impedance `Zk = Zbus[f,f]` built with source shunts `1/(c·Zsource)`.
+  Three-phase and two-phase (line-to-line) faults; external-grid-type sources
+  and lines. Structured per-bus outcomes (`.solved` / `.isolatedBus` /
+  `.noSourceFeeding`). Sources are `Generator`s carrying a subtransient
+  impedance (`scSubtransientRPu` / `scSubtransientXPu`).
+- **Planned**: zero-sequence networks (line-to-ground faults) and transformer /
+  generator impedance-correction factors (K_T / K_G), multi-element and
+  generator contingencies (the contingency and short-circuit code mark those
+  plug points) — all consuming the same `BusBranchNetwork` and Ybus. This is an
+  early, piece-by-piece project; every piece lands with its oracle tests.
 
 ## Validation results
 
@@ -95,6 +104,22 @@ pypower emits `inf`/`nan` for those columns:
 A synthetic phase-shifter + off-nominal-tap network additionally checks LODF
 against a DC re-solve at **1.2e-15 pu** — a case the IEEE networks cannot
 cover, since none of them contains a phase shifter.
+
+Short-circuit is validated against pandapower's `calc_sc` (IEC 60909) on
+purpose-built networks — the IEEE cases carry no short-circuit data. The
+meshed two-source network is the key one: it resolves multi-source fault
+contribution through the Zbus inversion, which a radial network cannot.
+Currents agree to machine precision:
+
+| Fault | Network | Max \|ΔIk''\| | Max \|Δip\| | Max \|ΔIth\| |
+|---|---|---|---|---|
+| 3-phase | radial | 2.0e-14 kA | 4.4e-14 kA | 2.0e-14 kA |
+| 3-phase | meshed two-source | 6.4e-14 kA | 1.5e-13 kA | 6.9e-14 kA |
+| 2-phase | meshed two-source | 5.6e-14 kA | 1.3e-13 kA | 6.0e-14 kA |
+
+Edge cases are validated as reported outcomes, not numbers: a fault at an
+isolated bus reports `.isolatedBus`, and one in a source-less component
+reports `.noSourceFeeding` (pandapower returns NaN for both).
 
 ## Usage
 
@@ -140,6 +165,29 @@ for result in screening.casesWithViolations {
 
 // Outages that split the network are reported, not silently wrong:
 let islanding = screening.cases.filter { $0.outcome == .islandsNetwork }
+```
+
+IEC 60909 short-circuit needs fault-current sources — generators carrying a
+subtransient impedance. `scSubtransientRPu` / `scSubtransientXPu` are how a
+generator (or the slack, standing in for the external grid) contributes fault
+current; a generator with neither is not a source:
+
+```swift
+let scNetwork = BusBranchNetwork(
+    baseMVA: 100,
+    buses: [.init(type: .slack, baseKv: 110), .init(type: .pq, baseKv: 110)],
+    branches: [.init(from: 0, to: 1, r: 0.008, x: 0.033)],
+    // raw source impedance in pu (Un²/S″k for a grid), before the voltage factor c:
+    generators: [.init(bus: 0, pPu: 0, vSetPu: 1.0,
+                       scSubtransientRPu: 0.0099, scSubtransientXPu: 0.0995)])
+
+var scOptions = ShortCircuitOptions()
+scOptions.faultType = .threePhase          // or .twoPhase (line-to-line)
+let sc = ShortCircuitAnalyzer().faults(scNetwork, options: scOptions)
+
+for r in sc.buses where r.outcome == .solved {
+    print("bus \(r.bus): Ik'' \(r.ikssKa) kA, ip \(r.ipKa) kA, Ith \(r.ithKa) kA")
+}
 ```
 
 `YbusBuilder.build(network)` is also public if you only need the admittance

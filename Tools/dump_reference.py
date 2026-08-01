@@ -265,6 +265,128 @@ def dump_contingency(net, name: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Piece 4 oracle: IEC 60909 short-circuit.                                      #
+#                                                                              #
+# The IEEE cases carry no short-circuit data (calc_sc fails on them), so the   #
+# references are purpose-built networks, authored here in per-unit on a 100    #
+# MVA base. Each is fed to pandapower in the equivalent engineering units and  #
+# the SAME per-unit definition is dumped for the Swift side, so both solve     #
+# identical data. Scope matches the solver: external-grid-type sources + lines #
+# (no transformers -> no K_T correction), three-phase and two-phase faults.    #
+# --------------------------------------------------------------------------- #
+SC_BASE_MVA = 100.0
+SC_C = 1.1          # c_max for HV (>1 kV); pandapower uses the same for 110 kV
+SC_TK_S = 0.1
+SC_FREQ_HZ = 50.0
+
+# type codes match BusBranchNetwork.BusType: 1=pq, 3=slack, 4=isolated.
+SC_NETWORKS = [
+    {
+        "name": "radial",
+        "buses": [{"base_kv": 110.0, "type": 3}, {"base_kv": 110.0, "type": 1},
+                  {"base_kv": 110.0, "type": 1}],
+        "branches": [{"f": 0, "t": 1, "r_pu": 0.008264, "x_pu": 0.033058},
+                     {"f": 1, "t": 2, "r_pu": 0.006612, "x_pu": 0.026446}],
+        # one external-grid source; raw (pre-c) subtransient impedance, pu.
+        "sources": [{"bus": 0, "sc_r_pu": 0.0099504, "sc_x_pu": 0.0995037}],
+    },
+    {
+        # The key network: two sources feeding a mesh, so the fault current at
+        # each bus is a multi-source contribution resolved through the Zbus
+        # inversion — a radial test would not exercise that.
+        "name": "meshed_two_source",
+        "buses": [{"base_kv": 110.0, "type": 3}, {"base_kv": 110.0, "type": 1},
+                  {"base_kv": 110.0, "type": 1}, {"base_kv": 110.0, "type": 3}],
+        "branches": [{"f": 0, "t": 1, "r_pu": 0.007934, "x_pu": 0.034711},
+                     {"f": 1, "t": 2, "r_pu": 0.005289, "x_pu": 0.023141},
+                     {"f": 2, "t": 3, "r_pu": 0.009917, "x_pu": 0.043388},
+                     {"f": 0, "t": 2, "r_pu": 0.013223, "x_pu": 0.057851},
+                     {"f": 1, "t": 3, "r_pu": 0.006612, "x_pu": 0.028926}],
+        "sources": [{"bus": 0, "sc_r_pu": 0.006633, "sc_x_pu": 0.066334},
+                    {"bus": 3, "sc_r_pu": 0.014799, "sc_x_pu": 0.123328}],
+    },
+    {
+        # Edge cases: a fed pair, an isolated-type bus, and a source-less
+        # component. pandapower returns NaN for the last two; the Swift side
+        # must report `.isolatedBus` / `.noSourceFeeding`, not a number.
+        "name": "edge_cases",
+        "buses": [{"base_kv": 110.0, "type": 3}, {"base_kv": 110.0, "type": 1},
+                  {"base_kv": 110.0, "type": 4},                       # isolated
+                  {"base_kv": 110.0, "type": 1}, {"base_kv": 110.0, "type": 1}],
+        "branches": [{"f": 0, "t": 1, "r_pu": 0.004132, "x_pu": 0.016529},
+                     {"f": 3, "t": 4, "r_pu": 0.004132, "x_pu": 0.016529}],  # unfed
+        "sources": [{"bus": 0, "sc_r_pu": 0.0099504, "sc_x_pu": 0.0995037}],
+    },
+]
+
+
+def _sc_build_pp_net(spec: dict):
+    net = pp.create_empty_network(sn_mva=SC_BASE_MVA)
+    bus_ids = []
+    for b in spec["buses"]:
+        bus_ids.append(pp.create_bus(net, vn_kv=b["base_kv"]))
+    for src in spec["sources"]:
+        b = spec["buses"][src["bus"]]
+        zbase = b["base_kv"] ** 2 / SC_BASE_MVA
+        zmag_pu = (src["sc_r_pu"] ** 2 + src["sc_x_pu"] ** 2) ** 0.5
+        # raw (pre-c) source impedance Un^2/Ssc = zmag_pu * zbase -> Ssc, rx.
+        s_sc = SC_BASE_MVA / zmag_pu
+        rx = src["sc_r_pu"] / src["sc_x_pu"]
+        pp.create_ext_grid(net, bus_ids[src["bus"]], s_sc_max_mva=s_sc, rx_max=rx)
+    for br in spec["branches"]:
+        fb, tb = spec["buses"][br["f"]], spec["buses"][br["t"]]
+        zbase = fb["base_kv"] ** 2 / SC_BASE_MVA
+        pp.create_line_from_parameters(
+            net, bus_ids[br["f"]], bus_ids[br["t"]], length_km=1.0,
+            r_ohm_per_km=br["r_pu"] * zbase, x_ohm_per_km=br["x_pu"] * zbase,
+            c_nf_per_km=0.0, max_i_ka=1.0)
+    return net, bus_ids
+
+
+def _sc_results(net, bus_ids, fault: str) -> list:
+    from pandapower.shortcircuit import calc_sc
+    calc_sc(net, fault=fault, case="max", ip=True, ith=True, tk_s=SC_TK_S,
+            kappa_method="C")
+    df = net.res_bus_sc
+    out = []
+    for b in bus_ids:
+        if b not in df.index or not np.isfinite(df.ikss_ka.at[b]):
+            out.append(None)
+            continue
+        row = {
+            "ikss_ka": float(df.ikss_ka.at[b]),
+            "ip_ka": float(df.ip_ka.at[b]) if np.isfinite(df.ip_ka.at[b]) else None,
+            "ith_ka": float(df.ith_ka.at[b]) if np.isfinite(df.ith_ka.at[b]) else None,
+            "rk_ohm": float(df.rk_ohm.at[b]),
+            "xk_ohm": float(df.xk_ohm.at[b]),
+        }
+        # S″k = √3·Un·I″k is a three-phase quantity; pandapower reports a
+        # different convention for 2ph, so only carry it for the 3ph oracle.
+        if fault == "3ph" and "skss_mw" in df.columns and np.isfinite(df.skss_mw.at[b]):
+            row["skss_mva"] = float(df.skss_mw.at[b])
+        out.append(row)
+    return out
+
+
+def dump_shortcircuit() -> list:
+    networks = []
+    for spec in SC_NETWORKS:
+        net, bus_ids = _sc_build_pp_net(spec)
+        net2, _ = _sc_build_pp_net(spec)      # 2ph on a fresh net
+        entry = dict(spec)
+        entry["base_mva"] = SC_BASE_MVA
+        entry["c"] = SC_C
+        entry["tk_s"] = SC_TK_S
+        entry["freq_hz"] = SC_FREQ_HZ
+        entry["results"] = {
+            "3ph": _sc_results(net, bus_ids, "3ph"),
+            "2ph": _sc_results(net2, bus_ids, "2ph"),
+        }
+        networks.append(entry)
+    return networks
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -315,6 +437,15 @@ def main() -> None:
               f"NR iterations={it}, DC dumped, "
               f"{len(cg['outages'])} outages ({len(cg['islanding_branches'])} islanding) "
               f"-> {out.relative_to(HERE.parent)}")
+
+    # Piece 4: short-circuit reference networks (separate file — the IEEE case
+    # JSONs carry no short-circuit data).
+    sc = {"pandapower_version": pp.__version__, "networks": dump_shortcircuit()}
+    sc_out = OUT_DIR / "shortcircuit.json"
+    sc_out.write_text(json.dumps(sc, indent=1))
+    print(f"shortcircuit: {len(sc['networks'])} networks "
+          f"({', '.join(n['name'] for n in sc['networks'])}) "
+          f"-> {sc_out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":
