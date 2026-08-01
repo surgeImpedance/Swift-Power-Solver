@@ -73,10 +73,20 @@ public struct BusBranchNetwork: Equatable, Sendable {
         public var qMinPu: Double
         public var qMaxPu: Double
         public var inService: Bool
+        /// Positive-sequence internal (subtransient) short-circuit impedance,
+        /// pu on the system base — the raw source impedance BEFORE the IEC
+        /// 60909 voltage factor c is applied (e.g. Un²/S″k for an external
+        /// grid, or X″d for a machine). `nil` on both ⇒ not a fault source, so
+        /// the generator contributes nothing to short-circuit calculations.
+        /// Used only by `ShortCircuitAnalyzer`; the power-flow solvers ignore it.
+        public var scSubtransientRPu: Double?
+        public var scSubtransientXPu: Double?
 
         public init(bus: Int, pPu: Double, vSetPu: Double, vaRefRad: Double = 0,
                     qMinPu: Double = -.infinity, qMaxPu: Double = .infinity,
-                    inService: Bool = true) {
+                    inService: Bool = true,
+                    scSubtransientRPu: Double? = nil,
+                    scSubtransientXPu: Double? = nil) {
             self.bus = bus
             self.pPu = pPu
             self.vSetPu = vSetPu
@@ -84,6 +94,8 @@ public struct BusBranchNetwork: Equatable, Sendable {
             self.qMinPu = qMinPu
             self.qMaxPu = qMaxPu
             self.inService = inService
+            self.scSubtransientRPu = scSubtransientRPu
+            self.scSubtransientXPu = scSubtransientXPu
         }
     }
 
