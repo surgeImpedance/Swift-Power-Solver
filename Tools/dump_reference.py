@@ -387,6 +387,37 @@ def dump_shortcircuit() -> list:
     return networks
 
 
+# --------------------------------------------------------------------------- #
+# Time-series sweep oracle (quasi-static). A base IEEE case driven by an        #
+# N-step load-multiplier profile: each step scales all loads and solves — the   #
+# numerically identical per-step calculation pandapower's time-series module    #
+# (ConstControl load scaling + run_timeseries) performs. Warm- vs flat-start is #
+# an iteration-count difference only, so the per-step converged solution is the #
+# oracle regardless of start. The Swift sweep reads case14's base loads,        #
+# applies the same multipliers, warm-starts each step, and must match these.    #
+# --------------------------------------------------------------------------- #
+TIMESERIES_BASE = "case14"
+TIMESERIES_MULTIPLIERS = [0.65, 0.80, 0.95, 1.00, 1.10, 1.25, 1.40, 1.20, 0.90, 0.70]
+
+
+def dump_timeseries() -> dict:
+    make_net = CASES[TIMESERIES_BASE]
+    steps = []
+    for m in TIMESERIES_MULTIPLIERS:
+        net = make_net()
+        net.load.p_mw = net.load.p_mw * m
+        net.load.q_mvar = net.load.q_mvar * m
+        pp.runpp(net, enforce_q_lims=False, calculate_voltage_angles=True,
+                 init="flat", tolerance_mva=1e-10)
+        _check_ppc_is_identity_mapped(net)
+        sol = dump_solution(net)
+        sol["multiplier"] = m
+        steps.append(sol)
+    return {"base_case": TIMESERIES_BASE,
+            "multipliers": list(TIMESERIES_MULTIPLIERS),
+            "steps": steps}
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -446,6 +477,13 @@ def main() -> None:
     print(f"shortcircuit: {len(sc['networks'])} networks "
           f"({', '.join(n['name'] for n in sc['networks'])}) "
           f"-> {sc_out.relative_to(HERE.parent)}")
+
+    # Time-series sweep reference (separate file; additive).
+    ts = {"pandapower_version": pp.__version__, **dump_timeseries()}
+    ts_out = OUT_DIR / "timeseries.json"
+    ts_out.write_text(json.dumps(ts, indent=1))
+    print(f"timeseries: base {ts['base_case']}, {len(ts['steps'])} steps "
+          f"-> {ts_out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":
