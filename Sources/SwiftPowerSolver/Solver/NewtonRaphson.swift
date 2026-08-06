@@ -67,6 +67,16 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         if let refGen = net.generators.first(where: { $0.inService && isSlack[$0.bus] }) {
             va = [Double](repeating: refGen.vaRefRad, count: n)
         }
+        // Warm start (opt-in): seed voltages from a provided guess. Only finite,
+        // positive magnitudes are taken (a prior step's NaN dead-bus falls back
+        // to flat); with the default nil guess these blocks are skipped and the
+        // start is bit-identical to a flat start.
+        if let vm0 = options.initialVmPu, vm0.count == n {
+            for i in 0..<n where vm0[i].isFinite && vm0[i] > 0 { vm[i] = vm0[i] }
+        }
+        if let va0 = options.initialVaRad, va0.count == n {
+            for i in 0..<n where va0[i].isFinite { va[i] = va0[i] }
+        }
         for gen in net.generators where gen.inService {
             vm[gen.bus] = gen.vSetPu
             if isSlack[gen.bus] { va[gen.bus] = gen.vaRefRad }

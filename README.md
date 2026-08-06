@@ -57,6 +57,16 @@ extracted from a substation simulator that does exactly that.)
   and lines. Structured per-bus outcomes (`.solved` / `.isolatedBus` /
   `.noSourceFeeding`). Sources are `Generator`s carrying a subtransient
   impedance (`scSubtransientRPu` / `scSubtransientXPu`).
+- **Time-series / quasi-static sweep** (`TimeSeriesSweep`): steps a base network
+  through a sequence of per-step conditions (`[LoadStep]` — absolute per-bus
+  loads, plus optional generator setpoint overrides), **warm-starting** each
+  step's Newton-Raphson from the previous *converged* step's voltages. Per-step
+  convergence status is reported; a diverging step does not seed its successor
+  (no cascade), with continue-and-report (default) or halt-on-first-failure
+  policies. This is the stepping loop a time-varying profile or an RL
+  environment drives. Warm-starting rides on the opt-in
+  `PowerFlowOptions.initialVmPu` / `initialVaRad` — a single solve can be
+  warm-started too.
 - **Planned**: zero-sequence networks (line-to-ground faults) and transformer /
   generator impedance-correction factors (K_T / K_G), multi-element and
   generator contingencies (the contingency and short-circuit code mark those
@@ -80,6 +90,9 @@ tolerances; actual agreement is machine precision:
 | IEEE 14/39/118 DC vs `rundcpp` | branch P flow | 3.9e-12 MW |
 | IEEE 14/39/118 LODF vs `makeLODF` | outage distribution factor | 5.0e-14 |
 | IEEE 14/39/118 N-1 vs repeated `rundcpp` | post-contingency P | 1.5e-11 MW |
+| IEC 60909 short-circuit vs `calc_sc` (3ph/2ph) | Ik'' / ip / Ith | 1.5e-13 kA |
+| case14 time-series (10-step profile) vs `run_timeseries` | per-step Vm/Va/flow | 4.8e-11 MVA |
+| warm-start vs flat-start, same step | Vm/Va (same root) | 1.2e-13 |
 
 DC agreement per case (angle Va / branch P), against pandapower `rundcpp`:
 
@@ -120,6 +133,14 @@ Currents agree to machine precision:
 Edge cases are validated as reported outcomes, not numbers: a fault at an
 isolated bus reports `.isolatedBus`, and one in a source-less component
 reports `.noSourceFeeding` (pandapower returns NaN for both).
+
+The time-series sweep is validated two ways. Per-step, case14 driven by a
+10-step load-multiplier profile matches pandapower's `run_timeseries`
+(`ConstControl` load scaling + `runpp` per step) at machine precision. And a
+distinct guard confirms **warm-start == flat-start** for the same step to
+1.2e-13 — warm-starting reaches the same root, so it is a speed optimization
+and never a different answer. Across the profile, warm-starting cut total
+iterations from 40 (flat) to 32.
 
 ## Usage
 
@@ -189,6 +210,32 @@ for r in sc.buses where r.outcome == .solved {
     print("bus \(r.bus): Ik'' \(r.ikssKa) kA, ip \(r.ipKa) kA, Ith \(r.ithKa) kA")
 }
 ```
+
+A time-series sweep steps a base network through per-step conditions, warm-
+starting each step from the previous converged one. Each `LoadStep` gives
+absolute per-bus loads (a uniform profile scales the base loads; RL can vary
+buses independently):
+
+```swift
+// A daily-ish load profile: scale the base loads per step.
+let steps = [0.8, 1.0, 1.25, 1.1].map { m -> LoadStep in
+    var busLoads: [Int: LoadStep.BusLoad] = [:]
+    for (i, bus) in network.buses.enumerated() where bus.pLoadPu != 0 {
+        busLoads[i] = .init(pPu: bus.pLoadPu * m, qPu: bus.qLoadPu * m)
+    }
+    return LoadStep(busLoads: busLoads)
+}
+
+let results = TimeSeriesSweep().run(base: network, steps: steps)
+                                                    // .halt to stop at first failure
+for (k, step) in results.enumerated() {
+    guard step.converged else { print("step \(k): \(step.failureReason ?? "?")"); continue }
+    print("step \(k): \(step.iterations) iters (warm: \(step.warmStarted)), Vm \(step.vmPu)")
+}
+```
+
+A single solve can also be warm-started directly via
+`PowerFlowOptions.initialVmPu` / `initialVaRad` (nil ⇒ ordinary flat start).
 
 `YbusBuilder.build(network)` is also public if you only need the admittance
 matrix.

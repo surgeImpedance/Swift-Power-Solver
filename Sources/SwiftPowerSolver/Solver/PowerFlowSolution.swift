@@ -8,13 +8,25 @@ public struct PowerFlowOptions: Sendable {
     /// Enforce generator reactive limits by PV -> PQ switching after each
     /// converged solve (pandapower enforce_q_lims).
     public var enforceQLimits: Bool
+    /// Optional warm-start voltages (per bus, parallel to `network.buses`). When
+    /// set, the Newton-Raphson solve seeds free-variable voltages from these
+    /// instead of a flat start; non-finite or non-positive entries fall back to
+    /// flat per bus, and slack/PV setpoints are re-pinned regardless. `nil`
+    /// (the default) is an ordinary flat start — bit-identical to before this
+    /// field existed. Used by `TimeSeriesSweep` to warm-start each step.
+    public var initialVmPu: [Double]?
+    public var initialVaRad: [Double]?
 
     public init(tolerancePu: Double = 1e-8,
                 maxIterations: Int = 30,
-                enforceQLimits: Bool = false) {
+                enforceQLimits: Bool = false,
+                initialVmPu: [Double]? = nil,
+                initialVaRad: [Double]? = nil) {
         self.tolerancePu = tolerancePu
         self.maxIterations = maxIterations
         self.enforceQLimits = enforceQLimits
+        self.initialVmPu = initialVmPu
+        self.initialVaRad = initialVaRad
     }
 }
 
