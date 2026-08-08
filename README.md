@@ -67,6 +67,13 @@ extracted from a substation simulator that does exactly that.)
   environment drives. Warm-starting rides on the opt-in
   `PowerFlowOptions.initialVmPu` / `initialVaRad` — a single solve can be
   warm-started too.
+- **Distributed slack** (`Generator.slackWeight`): instead of one slack bus
+  absorbing all imbalance, participating generators share it by participation
+  factor (pandapower `slack_weight`, normalized to sum 1). An extra scalar
+  unknown enters the Newton-Raphson solve and each contributor delivers
+  `setpoint − share`, while the angle reference is preserved (one bus still
+  fixes θ). Opt-in: with no weights the solve is the ordinary single-slack NR,
+  unchanged.
 - **Planned**: zero-sequence networks (line-to-ground faults) and transformer /
   generator impedance-correction factors (K_T / K_G), multi-element and
   generator contingencies (the contingency and short-circuit code mark those
@@ -93,6 +100,7 @@ tolerances; actual agreement is machine precision:
 | IEC 60909 short-circuit vs `calc_sc` (3ph/2ph) | Ik'' / ip / Ith | 1.5e-13 kA |
 | case14 time-series (10-step profile) vs `run_timeseries` | per-step Vm/Va/flow | 4.8e-11 MVA |
 | warm-start vs flat-start, same step | Vm/Va (same root) | 1.2e-13 |
+| distributed slack vs `distributed_slack=True` | Vm / Va (de-ref) / gen P | 4.4e-11 MW |
 
 DC agreement per case (angle Va / branch P), against pandapower `rundcpp`:
 
@@ -133,6 +141,17 @@ Currents agree to machine precision:
 Edge cases are validated as reported outcomes, not numbers: a fault at an
 isolated bus reports `.isolatedBus`, and one in a source-less component
 reports `.noSourceFeeding` (pandapower returns NaN for both).
+
+Distributed slack is validated against pandapower `distributed_slack=True` on
+purpose-built networks (the IEEE cases are single-slack): per-bus voltages and
+**per-generator P shares** agree to machine precision. Angles are compared
+**de-referenced** against the slack bus, so a reference rotation cancels rather
+than reading as a false mismatch — the residual (3.1e-17 rad on the 2:1:1 case)
+is genuine physics, not a hidden reference offset. A negative control confirms
+the match is not vacuous: perturbing one participation weight (1→5) drives the
+generator dispatch 22.77 MW away from pandapower. And a uniform-weight case is
+checked independently of the oracle — equal weights split the imbalance evenly
+(spread 3.6e-15 MW).
 
 The time-series sweep is validated two ways. Per-step, case14 driven by a
 10-step load-multiplier profile matches pandapower's `run_timeseries`
@@ -236,6 +255,28 @@ for (k, step) in results.enumerated() {
 
 A single solve can also be warm-started directly via
 `PowerFlowOptions.initialVmPu` / `initialVaRad` (nil ⇒ ordinary flat start).
+
+Distributed slack is opt-in: give participating generators a `slackWeight` and
+the solve shares the imbalance across them by normalized weight instead of
+piling it on one slack bus. With no weights the solve is ordinary single-slack.
+
+```swift
+let network = BusBranchNetwork(
+    baseMVA: 100,
+    buses: [.init(type: .slack, baseKv: 110),   // angle reference
+            .init(type: .pv, baseKv: 110),
+            .init(type: .pq, baseKv: 110, pLoadPu: 1.4, qLoadPu: 0.4)],
+    branches: [.init(from: 0, to: 1, r: 0.01, x: 0.1),
+               .init(from: 1, to: 2, r: 0.01, x: 0.1),
+               .init(from: 0, to: 2, r: 0.02, x: 0.2)],
+    generators: [
+        .init(bus: 0, pPu: 0,   vSetPu: 1.02, slackWeight: 2),   // shares 50%
+        .init(bus: 1, pPu: 0.5, vSetPu: 1.01, slackWeight: 1),   // shares 25%
+    ])
+
+let sol = NewtonRaphsonSolver().solve(network)
+print(sol.genPPu)   // each contributor = setpoint − its share of the imbalance
+```
 
 `YbusBuilder.build(network)` is also public if you only need the admittance
 matrix.

@@ -418,6 +418,92 @@ def dump_timeseries() -> dict:
             "steps": steps}
 
 
+# --------------------------------------------------------------------------- #
+# Distributed-slack oracle. Purpose-built networks (the IEEE cases are single-  #
+# slack): an ext_grid (angle reference) plus generators, each carrying a        #
+# slack_weight, solved with distributed_slack=True. The imbalance is shared     #
+# across contributors proportional to normalized weight. We dump the ppc-level  #
+# per-unit inputs, the raw per-generator weights, and the solution (per-bus     #
+# vm/va and per-generator P) so the Swift solve sees identical data.            #
+# --------------------------------------------------------------------------- #
+DSLACK_BASE_MVA = 100.0
+
+# name, buses [(vn_kv,)], ext_grid (bus, vm, weight), gens [(bus, p_mw, vm,
+# weight)], loads [(bus, p_mw, q_mvar)], lines [(f, t, len_km)].
+DSLACK_NETWORKS = [
+    {
+        "name": "grid_two_gen",           # ext_grid weight 2, gens weight 1,1 (non-uniform)
+        "buses": [110.0, 110.0, 110.0, 110.0],
+        "ext_grid": (0, 1.02, 2.0),
+        "gens": [(1, 50.0, 1.01, 1.0), (2, 30.0, 1.00, 1.0)],
+        "loads": [(3, 120.0, 40.0), (1, 20.0, 5.0)],
+        "lines": [(0, 1), (1, 2), (2, 3), (0, 3)],
+    },
+    {
+        "name": "uniform_three",          # all contributors equal weight -> even split
+        "buses": [220.0, 220.0, 220.0, 220.0],
+        "ext_grid": (0, 1.03, 1.0),
+        "gens": [(1, 40.0, 1.02, 1.0), (3, 40.0, 1.02, 1.0)],
+        "loads": [(2, 150.0, 45.0)],
+        "lines": [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)],
+    },
+]
+
+
+def _build_dslack_net(spec: dict):
+    net = pp.create_empty_network(sn_mva=DSLACK_BASE_MVA)
+    b = [pp.create_bus(net, vn_kv=vn) for vn in spec["buses"]]
+    eg_bus, eg_vm, eg_w = spec["ext_grid"]
+    pp.create_ext_grid(net, b[eg_bus], vm_pu=eg_vm, slack_weight=eg_w)
+    for gb, p, vm, w in spec["gens"]:
+        pp.create_gen(net, b[gb], p_mw=p, vm_pu=vm, slack_weight=w)
+    for lb, p, q in spec["loads"]:
+        pp.create_load(net, b[lb], p_mw=p, q_mvar=q)
+    for f, t in spec["lines"]:
+        pp.create_line_from_parameters(net, b[f], b[t], length_km=10,
+                                       r_ohm_per_km=0.05, x_ohm_per_km=0.30,
+                                       c_nf_per_km=0.0, max_i_ka=1.0)
+    return net
+
+
+def dump_distributed_slack() -> list:
+    networks = []
+    for spec in DSLACK_NETWORKS:
+        net = _build_dslack_net(spec)
+        pp.runpp(net, distributed_slack=True, calculate_voltage_angles=True,
+                 init="flat", tolerance_mva=1e-10)
+        _check_ppc_is_identity_mapped(net)
+        params = dump_params(net)   # buses / branches (ppc-level pu inputs)
+
+        # Generators in ppc order (ext_grid first, then gens). Setpoints come
+        # from the net inputs, NOT ppc PG (which holds the distributed result).
+        gens = [{"bus": int(net.ext_grid.bus.iloc[0]), "p_set_mw": 0.0,
+                 "vm_pu": float(net.ext_grid.vm_pu.iloc[0]),
+                 "slack_weight": float(net.ext_grid.slack_weight.iloc[0])}]
+        for i in range(len(net.gen)):
+            gens.append({"bus": int(net.gen.bus.iloc[i]),
+                         "p_set_mw": float(net.gen.p_mw.iloc[i]),
+                         "vm_pu": float(net.gen.vm_pu.iloc[i]),
+                         "slack_weight": float(net.gen.slack_weight.iloc[i])})
+        # Per-generator solved P, same order.
+        gen_p = [float(net.res_ext_grid.p_mw.iloc[0])] + \
+                [float(net.res_gen.p_mw.iloc[i]) for i in range(len(net.gen))]
+
+        networks.append({
+            "name": spec["name"],
+            "base_mva": params["base_mva"],
+            "buses": params["buses"],
+            "branches": params["branches"],
+            "gens": gens,
+            "solution": {
+                "vm_pu": [float(v) for v in net._ppc["bus"][:, VM]],
+                "va_deg": [float(v) for v in net._ppc["bus"][:, VA]],
+                "gen_p_mw": gen_p,
+            },
+        })
+    return networks
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -484,6 +570,14 @@ def main() -> None:
     ts_out.write_text(json.dumps(ts, indent=1))
     print(f"timeseries: base {ts['base_case']}, {len(ts['steps'])} steps "
           f"-> {ts_out.relative_to(HERE.parent)}")
+
+    # Distributed-slack reference networks (separate file; additive).
+    ds = {"pandapower_version": pp.__version__, "networks": dump_distributed_slack()}
+    ds_out = OUT_DIR / "distributed_slack.json"
+    ds_out.write_text(json.dumps(ds, indent=1))
+    print(f"distributed_slack: {len(ds['networks'])} networks "
+          f"({', '.join(n['name'] for n in ds['networks'])}) "
+          f"-> {ds_out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":
