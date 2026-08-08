@@ -81,12 +81,20 @@ public struct BusBranchNetwork: Equatable, Sendable {
         /// Used only by `ShortCircuitAnalyzer`; the power-flow solvers ignore it.
         public var scSubtransientRPu: Double?
         public var scSubtransientXPu: Double?
+        /// Distributed-slack contribution weight (pandapower `slack_weight`).
+        /// `nil`/0 on every generator ⇒ ordinary single-slack: the slack bus(es)
+        /// absorb all imbalance, exactly as before this field existed. When any
+        /// generator carries a weight, the solver switches to distributed slack —
+        /// weights are normalized to sum to 1 across contributors and the power
+        /// imbalance is shared proportionally. Used only by NewtonRaphsonSolver.
+        public var slackWeight: Double?
 
         public init(bus: Int, pPu: Double, vSetPu: Double, vaRefRad: Double = 0,
                     qMinPu: Double = -.infinity, qMaxPu: Double = .infinity,
                     inService: Bool = true,
                     scSubtransientRPu: Double? = nil,
-                    scSubtransientXPu: Double? = nil) {
+                    scSubtransientXPu: Double? = nil,
+                    slackWeight: Double? = nil) {
             self.bus = bus
             self.pPu = pPu
             self.vSetPu = vSetPu
@@ -96,6 +104,7 @@ public struct BusBranchNetwork: Equatable, Sendable {
             self.inService = inService
             self.scSubtransientRPu = scSubtransientRPu
             self.scSubtransientXPu = scSubtransientXPu
+            self.slackWeight = slackWeight
         }
     }
 

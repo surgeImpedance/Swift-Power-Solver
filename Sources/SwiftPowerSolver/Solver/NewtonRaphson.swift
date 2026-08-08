@@ -46,9 +46,29 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             return failed(net, reason: "no slack bus")
         }
 
+        // --- distributed slack (opt-in) -------------------------------------
+        // Any in-service generator carrying a slack weight switches the solve
+        // to distributed slack (pandapower distributed_slack=True): weights are
+        // normalized to sum to 1 across contributors and aggregated per bus; the
+        // first slack bus stays the angle reference (θ fixed) while every
+        // contributor shares the imbalance by weight. With no weights this is
+        // all inert and the solve below is the single-slack path unchanged.
+        let contributors = net.generators.indices.filter {
+            net.generators[$0].inService && (net.generators[$0].slackWeight ?? 0) != 0
+        }
+        let distributed = !contributors.isEmpty
+        let angleRef = slackBuses[0]
+        var swGen = [Double](repeating: 0, count: net.generators.count)  // per-gen, normalized
+        var swBus = [Double](repeating: 0, count: n)                     // per-bus, normalized
+        if distributed {
+            let total = contributors.reduce(0.0) { $0 + (net.generators[$1].slackWeight ?? 0) }
+            for g in contributors {
+                swGen[g] = (net.generators[g].slackWeight ?? 0) / total
+                swBus[net.generators[g].bus] += swGen[g]
+            }
+        }
+
         // --- specified injections (pu) --------------------------------------
-        // DISTRIBUTED SLACK: participation factors would scale an extra
-        // mismatch term added to pSpec here.
         var pSpec = [Double](repeating: 0, count: n)
         var qSpec = [Double](repeating: 0, count: n)
         for (i, bus) in net.buses.enumerated() {
@@ -90,6 +110,16 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         var pCalc = [Double](repeating: 0, count: n)
         var qCalc = [Double](repeating: 0, count: n)
 
+        // Distributed-slack scalar: the imbalance shared across contributors.
+        // Initial guess = total generation setpoint − total load (pandapower's
+        // (ΣPg − ΣPd)/baseMVA, already per-unit here). Unused in single-slack.
+        var slack = 0.0
+        if distributed {
+            let totalGen = net.generators.reduce(0.0) { $0 + ($1.inService ? $1.pPu : 0) }
+            let totalLoad = net.buses.reduce(0.0) { $0 + $1.pLoadPu }
+            slack = totalGen - totalLoad
+        }
+
         for _ in 0...max(1, net.generators.count) {
             // PV buses that still control voltage (some gen not pinned).
             var pvNow = [Bool](repeating: false, count: n)
@@ -106,13 +136,33 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 }
             }
 
-            let pv = (0..<n).filter { pvNow[$0] && live[$0] }
-            let pq = (0..<n).filter { live[$0] && !isSlack[$0] && !pvNow[$0] }
+            let pv: [Int]
+            let pq: [Int]
+            if distributed {
+                // Only the angle-reference bus is θ-fixed; other slack buses are
+                // voltage-controlled θ-variable buses (PV), like pandapower
+                // demoting extra refs to PV. A PV bus whose gens are all pinned
+                // drops to PQ, exactly as in single-slack.
+                pv = (0..<n).filter { $0 != angleRef && live[$0] && (pvNow[$0] || isSlack[$0]) }
+                pq = (0..<n).filter { $0 != angleRef && live[$0] && !pvNow[$0] && !isSlack[$0] }
+            } else {
+                pv = (0..<n).filter { pvNow[$0] && live[$0] }
+                pq = (0..<n).filter { live[$0] && !isSlack[$0] && !pvNow[$0] }
+            }
 
-            let inner = newtonIterate(
-                ybus: ybus, pSpec: pSpec, qSpec: qSpecNow,
-                pv: pv, pq: pq, vm: &vm, va: &va,
-                pCalc: &pCalc, qCalc: &qCalc, options: options)
+            let inner: InnerResult
+            if distributed {
+                inner = newtonIterateDistributed(
+                    ybus: ybus, pSpec: pSpec, qSpec: qSpecNow,
+                    pv: pv, pq: pq, angleRef: angleRef, swBus: swBus,
+                    vm: &vm, va: &va, slack: &slack,
+                    pCalc: &pCalc, qCalc: &qCalc, options: options)
+            } else {
+                inner = newtonIterate(
+                    ybus: ybus, pSpec: pSpec, qSpec: qSpecNow,
+                    pv: pv, pq: pq, vm: &vm, va: &va,
+                    pCalc: &pCalc, qCalc: &qCalc, options: options)
+            }
             totalIterations += inner.iterations
             guard inner.converged else {
                 return failed(net, reason: inner.reason ?? "did not converge",
@@ -183,10 +233,14 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 let qRemaining = qCalc[i] + net.buses[i].qLoadPu - pinnedQAtBus[i]
                 for g in unpinned { genQ[g] = qRemaining / Double(unpinned.count) }
             }
-            // Active: PV gens keep their setpoint; slack buses absorb the
-            // island imbalance. DISTRIBUTED SLACK: replace this per-bus
-            // assignment with participation-factor shares.
-            if isSlack[i] {
+            // Active: distributed slack shares the imbalance by weight —
+            // each contributor delivers its setpoint minus its share of the
+            // slack (gen.pPu − sw·slack); non-contributors keep their setpoint.
+            // Single-slack: PV gens keep their setpoint; the slack bus absorbs
+            // the island imbalance.
+            if distributed {
+                for g in gens { genP[g] = net.generators[g].pPu - swGen[g] * slack }
+            } else if isSlack[i] {
                 let pTotal = pCalc[i] + net.buses[i].pLoadPu
                 for g in gens { genP[g] = pTotal / Double(gens.count) }
             } else {
@@ -318,6 +372,139 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             }
             for (r, bus) in pvpq.enumerated() { va[bus] -= dx[r] }
             for (r, bus) in pq.enumerated() { vm[bus] -= dx[npvpq + r] }
+        }
+        return InnerResult(converged: false, iterations: options.maxIterations,
+                           reason: "did not converge")
+    }
+
+    // MARK: - Inner Newton iteration (distributed slack)
+
+    /// Distributed-slack variant: an extra scalar unknown `slack` is added, the
+    /// angle-reference bus gains a P-equation, and each bus's active mismatch
+    /// carries `+ swBus·slack` (pandapower's `mis = V·conj(Ybus·V) − Sbus +
+    /// slack_weights·slack`). Variables `[slack, θ_pvpq, Vm_pq]`, equations
+    /// `[P_angleRef, P_pvpq, Q_pq]` — square, +1/+1 over the single-slack solve.
+    /// θ of the angle reference stays fixed, so power is shared but the angle
+    /// anchor is not.
+    private func newtonIterateDistributed(
+        ybus: SparseComplexMatrix,
+        pSpec: [Double], qSpec: [Double],
+        pv: [Int], pq: [Int], angleRef: Int, swBus: [Double],
+        vm: inout [Double], va: inout [Double], slack: inout Double,
+        pCalc: inout [Double], qCalc: inout [Double],
+        options: PowerFlowOptions
+    ) -> InnerResult {
+        let n = ybus.n
+        let pvpq = pv + pq
+        let npvpq = pvpq.count
+        let npq = pq.count
+        let dim = 1 + npvpq + npq                        // slack + θ_pvpq + Vm_pq
+
+        // Row / column maps. Column 0 is the slack scalar. P-equation rows:
+        // 0 = angle reference, 1..npvpq = pvpq. θ columns: 1..npvpq (the angle
+        // reference has none). Q-row and Vm-column share the same index.
+        var pRow = [Int](repeating: -1, count: n)
+        pRow[angleRef] = 0
+        for (r, bus) in pvpq.enumerated() { pRow[bus] = 1 + r }
+        var thetaCol = [Int](repeating: -1, count: n)
+        for (r, bus) in pvpq.enumerated() { thetaCol[bus] = 1 + r }
+        var vmRC = [Int](repeating: -1, count: n)
+        for (r, bus) in pq.enumerated() { vmRC[bus] = 1 + npvpq + r }
+
+        func computeInjections() {
+            for i in 0..<n {
+                var p = 0.0, q = 0.0
+                for k in ybus.rowStarts[i]..<ybus.rowStarts[i + 1] {
+                    let j = ybus.columns[k]
+                    let g = ybus.re[k], b = ybus.im[k]
+                    let theta = va[i] - va[j]
+                    let c = cos(theta), s = sin(theta)
+                    p += vm[j] * (g * c + b * s)
+                    q += vm[j] * (g * s - b * c)
+                }
+                pCalc[i] = vm[i] * p
+                qCalc[i] = vm[i] * q
+            }
+        }
+
+        for iteration in 0...options.maxIterations {
+            computeInjections()
+
+            // Mismatch: P rows carry the distributed slack term + sw·slack.
+            var f = [Double](repeating: 0, count: dim)
+            var normF = 0.0
+            func setF(_ row: Int, _ value: Double) {
+                f[row] = value; normF = max(normF, abs(value))
+            }
+            setF(0, pCalc[angleRef] - pSpec[angleRef] + swBus[angleRef] * slack)
+            for (r, bus) in pvpq.enumerated() {
+                setF(1 + r, pCalc[bus] - pSpec[bus] + swBus[bus] * slack)
+            }
+            for (r, bus) in pq.enumerated() {
+                setF(1 + npvpq + r, qCalc[bus] - qSpec[bus])
+            }
+            if normF < options.tolerancePu {
+                return InnerResult(converged: true, iterations: iteration, reason: nil)
+            }
+            if iteration == options.maxIterations {
+                return InnerResult(converged: false, iterations: iteration,
+                                   reason: "max iterations (\(options.maxIterations)) "
+                                       + String(format: "reached, mismatch %.3e pu", normF))
+            }
+
+            var entries: [(row: Int, col: Int, value: Double)] = []
+            entries.reserveCapacity(4 * ybus.nonZeroCount + npvpq + 1)
+
+            // Slack column: ∂P[i]/∂slack = swBus[i] (∂Q/∂slack = 0).
+            if swBus[angleRef] != 0 { entries.append((0, 0, swBus[angleRef])) }
+            for (r, bus) in pvpq.enumerated() where swBus[bus] != 0 {
+                entries.append((1 + r, 0, swBus[bus]))
+            }
+
+            // Power-flow Jacobian over the Ybus sparsity pattern.
+            for i in 0..<n {
+                let rP = pRow[i]                              // ΔP row
+                let rQ = vmRC[i]                              // ΔQ row (pq only)
+                if rP < 0 && rQ < 0 { continue }
+                for k in ybus.rowStarts[i]..<ybus.rowStarts[i + 1] {
+                    let j = ybus.columns[k]
+                    let g = ybus.re[k], b = ybus.im[k]
+                    let cTheta = thetaCol[j]                  // dθ_j column
+                    let cVm = vmRC[j]                         // dVm_j column
+                    if cTheta < 0 && cVm < 0 { continue }
+
+                    var dPdT = 0.0, dPdV = 0.0, dQdT = 0.0, dQdV = 0.0
+                    if i == j {
+                        dPdT = -qCalc[i] - b * vm[i] * vm[i]
+                        dPdV = pCalc[i] / vm[i] + g * vm[i]
+                        dQdT = pCalc[i] - g * vm[i] * vm[i]
+                        dQdV = qCalc[i] / vm[i] - b * vm[i]
+                    } else {
+                        let theta = va[i] - va[j]
+                        let c = cos(theta), s = sin(theta)
+                        dPdT = vm[i] * vm[j] * (g * s - b * c)
+                        dPdV = vm[i] * (g * c + b * s)
+                        dQdT = -vm[i] * vm[j] * (g * c + b * s)
+                        dQdV = vm[i] * (g * s - b * c)
+                    }
+                    if rP >= 0 {
+                        if cTheta >= 0 { entries.append((rP, cTheta, dPdT)) }
+                        if cVm >= 0 { entries.append((rP, cVm, dPdV)) }
+                    }
+                    if rQ >= 0 {
+                        if cTheta >= 0 { entries.append((rQ, cTheta, dQdT)) }
+                        if cVm >= 0 { entries.append((rQ, cVm, dQdV)) }
+                    }
+                }
+            }
+
+            guard let dx = SparseLinearSolver.solve(n: dim, entries: entries, rhs: f) else {
+                return InnerResult(converged: false, iterations: iteration,
+                                   reason: "singular Jacobian")
+            }
+            slack -= dx[0]
+            for (r, bus) in pvpq.enumerated() { va[bus] -= dx[1 + r] }
+            for (r, bus) in pq.enumerated() { vm[bus] -= dx[1 + npvpq + r] }
         }
         return InnerResult(converged: false, iterations: options.maxIterations,
                            reason: "did not converge")
