@@ -66,6 +66,18 @@ public struct PowerFlowSolution: Sendable {
     public var genQPu: [Double]
     /// Generators switched PV -> PQ because they hit a reactive limit.
     public var pinnedGenIndices: Set<Int>
+    /// Distributed-slack contributors held AT a regulating (P) limit: they have
+    /// stopped following the imbalance and their `genPPu` is exactly `pMinPu` or
+    /// `pMaxPu`. Empty whenever no generator carries a P limit, so this is inert
+    /// on every network that predates the field.
+    public var pLimitedGenIndices: Set<Int> = []
+    /// Contributors still regulating BEYOND their range because every
+    /// participant was past its limit and something had to balance the island.
+    /// Non-empty means the distribution has run out of room — the answer is
+    /// converged and self-consistent, but the unit is outside the range it was
+    /// declared able to regulate over. See the saturation note in
+    /// `NewtonRaphsonSolver.solve`.
+    public var pSaturatedGenIndices: Set<Int> = []
 }
 
 public protocol PowerFlowSolver {

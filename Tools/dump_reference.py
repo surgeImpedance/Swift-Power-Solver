@@ -504,6 +504,166 @@ def dump_distributed_slack() -> list:
     return networks
 
 
+# --------------------------------------------------------------------------- #
+# Distributed slack WITH generator P limits (regulating range).                 #
+#                                                                               #
+# pandapower CANNOT be called directly for this: runpp ignores min_p_mw /       #
+# max_p_mw entirely. Verified two ways on pandapower 3.2.1 —                    #
+#   * empirically: distributed_slack=True drives a gen to 60.03 MW against a    #
+#     max_p_mw of 21;                                                           #
+#   * by source: pypower/newtonpf.py, the distributed-slack implementation,     #
+#     contains no reference to max_p_mw, min_p_mw or any enforce_p flag.        #
+#                                                                               #
+# So the pin-and-redistribute convention is the Swift package's own spec, and   #
+# pandapower is used as the oracle by NETWORK EQUIVALENCE instead: a converged  #
+# pinned solution is identical to an UNLIMITED distributed-slack problem in     #
+# which each pinned unit is fixed at its limit with zero participation and the  #
+# survivors' weights renormalize. Every line below is therefore a genuine       #
+# pandapower solve — the cascade is driven here, but each level is solved by    #
+# pandapower, not by us.                                                        #
+#                                                                               #
+# The cascade rule mirrored here (and specified in NewtonRaphson.solve):        #
+#   1. solve unlimited distributed slack over the active participants;          #
+#   2. pin EVERY participant outside its range, at the violated bound;          #
+#   3. renormalize the survivors and re-solve; repeat until no violation;       #
+#   4. never pin the last participant — it saturates instead.                   #
+# --------------------------------------------------------------------------- #
+PLIMIT_NETWORKS = [
+    {
+        # TWO units pin in TWO cascade levels — the limits are chosen so this
+        # cannot collapse into one batch pin:
+        #   unlimited      -> g1 76.086 (over its 55), g2 48.043 (UNDER its 50)
+        #   after g1 pins  -> g2 52.245 (now over its 50)  => second level
+        # g2's max sits strictly between 48.043 and 52.245, so g2 is only pushed
+        # over the edge BY g1 pinning. That is the cascade, not a batch.
+        "name": "cascade_two_pin",
+        "buses": [110.0, 110.0, 110.0, 110.0, 110.0],
+        "ext_grid": (0, 1.02, 3.0, None, None),
+        "gens": [(1, 40.0, 1.01, 2.0, None, 55.0),
+                 (2, 30.0, 1.00, 1.0, None, 50.0),
+                 (3, 25.0, 1.00, 1.0, None, None)],
+        "loads": [(4, 190.0, 55.0), (2, 30.0, 8.0)],
+        "lines": [(0, 1), (1, 2), (2, 3), (3, 4), (0, 4)],
+    },
+    {
+        # A LOWER-limit pin: load falls well below the scheduled dispatch, so
+        # the distribution drives units down and g1 hits pMin. The same rule has
+        # to work in the decreasing direction — that is AGC backing off.
+        "name": "lower_limit_pin",
+        "buses": [220.0, 220.0, 220.0, 220.0],
+        "ext_grid": (0, 1.03, 1.0, None, None),
+        "gens": [(1, 90.0, 1.02, 2.0, 70.0, None),
+                 (3, 80.0, 1.02, 1.0, None, None)],
+        "loads": [(2, 60.0, 15.0)],
+        "lines": [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)],
+    },
+]
+
+
+def _build_plimit_net(spec: dict, fixed: dict):
+    """`fixed` maps generator index (0 = ext_grid, 1.. = gens) to the MW it is
+    pinned at; a pinned unit gets slack_weight 0 so pandapower renormalizes the
+    survivors exactly as the Swift cascade does."""
+    net = pp.create_empty_network(sn_mva=DSLACK_BASE_MVA)
+    b = [pp.create_bus(net, vn_kv=vn) for vn in spec["buses"]]
+    eg_bus, eg_vm, eg_w, _, _ = spec["ext_grid"]
+    pp.create_ext_grid(net, b[eg_bus], vm_pu=eg_vm,
+                       slack_weight=0.0 if 0 in fixed else eg_w)
+    for k, (gb, p, vm, w, _, _) in enumerate(spec["gens"], start=1):
+        pp.create_gen(net, b[gb], p_mw=fixed.get(k, p), vm_pu=vm,
+                      slack_weight=0.0 if k in fixed else w)
+    for lb, p, q in spec["loads"]:
+        pp.create_load(net, b[lb], p_mw=p, q_mvar=q)
+    for f, t in spec["lines"]:
+        pp.create_line_from_parameters(net, b[f], b[t], length_km=10,
+                                       r_ohm_per_km=0.05, x_ohm_per_km=0.30,
+                                       c_nf_per_km=0.0, max_i_ka=1.0)
+    return net
+
+
+def _plimit_ranges(spec: dict) -> list:
+    """(pmin, pmax) per generator in ppc order: ext_grid first, then gens."""
+    return [(spec["ext_grid"][3], spec["ext_grid"][4])] + \
+           [(g[4], g[5]) for g in spec["gens"]]
+
+
+def dump_plimit_distributed_slack() -> list:
+    networks = []
+    for spec in PLIMIT_NETWORKS:
+        ranges = _plimit_ranges(spec)
+        fixed: dict = {}
+        levels = 0
+        while True:
+            net = _build_plimit_net(spec, fixed)
+            pp.runpp(net, distributed_slack=True, calculate_voltage_angles=True,
+                     init="flat", tolerance_mva=1e-10)
+            solved = [float(net.res_ext_grid.p_mw.iloc[0])] + \
+                     [float(net.res_gen.p_mw.iloc[i]) for i in range(len(net.gen))]
+            active = [k for k in range(len(solved)) if k not in fixed]
+            violators = {}
+            for k in active:
+                lo, hi = ranges[k]
+                if hi is not None and solved[k] > hi + 1e-9:
+                    violators[k] = hi
+                elif lo is not None and solved[k] < lo - 1e-9:
+                    violators[k] = lo
+            # Never pin the last participant — it saturates instead.
+            if violators and len(violators) == len(active):
+                keep = max(active, key=lambda k: (_weight(spec, k), -k))
+                violators.pop(keep, None)
+            if not violators:
+                break
+            fixed.update(violators)
+            levels += 1
+            if levels > len(solved) + 1:
+                raise RuntimeError("P-limit cascade did not settle")
+
+        # The SAME network with every limit ignored, solved by pandapower.
+        # Two jobs: it is the additive gate (the Swift solve with limits
+        # stripped must reproduce it at machine precision), and it proves the
+        # limits are what move the answer rather than some other difference.
+        unl = _build_plimit_net(spec, {})
+        pp.runpp(unl, distributed_slack=True, calculate_voltage_angles=True,
+                 init="flat", tolerance_mva=1e-10)
+        unlimited = {
+            "vm_pu": [float(v) for v in unl._ppc["bus"][:, VM]],
+            "va_deg": [float(v) for v in unl._ppc["bus"][:, VA]],
+            "gen_p_mw": [float(unl.res_ext_grid.p_mw.iloc[0])] +
+                        [float(unl.res_gen.p_mw.iloc[i]) for i in range(len(unl.gen))],
+        }
+
+        _check_ppc_is_identity_mapped(net)
+        params = dump_params(net)
+        gens = [{"bus": int(spec["ext_grid"][0]), "p_set_mw": 0.0,
+                 "vm_pu": float(spec["ext_grid"][1]),
+                 "slack_weight": float(spec["ext_grid"][2]),
+                 "p_min_mw": spec["ext_grid"][3], "p_max_mw": spec["ext_grid"][4]}]
+        for gb, p, vm, w, lo, hi in spec["gens"]:
+            gens.append({"bus": int(gb), "p_set_mw": float(p), "vm_pu": float(vm),
+                         "slack_weight": float(w), "p_min_mw": lo, "p_max_mw": hi})
+
+        networks.append({
+            "name": spec["name"],
+            "base_mva": params["base_mva"],
+            "buses": params["buses"],
+            "branches": params["branches"],
+            "gens": gens,
+            "cascade_levels": levels,
+            "pinned_gen_indices": sorted(fixed.keys()),
+            "solution": {
+                "vm_pu": [float(v) for v in net._ppc["bus"][:, VM]],
+                "va_deg": [float(v) for v in net._ppc["bus"][:, VA]],
+                "gen_p_mw": solved,
+            },
+            "unlimited_solution": unlimited,
+        })
+    return networks
+
+
+def _weight(spec: dict, k: int) -> float:
+    return float(spec["ext_grid"][2]) if k == 0 else float(spec["gens"][k - 1][3])
+
+
 def dump_case(name: str, make_net) -> dict:
     doc = {"name": name, "pandapower_version": pp.__version__}
 
@@ -578,6 +738,19 @@ def main() -> None:
     print(f"distributed_slack: {len(ds['networks'])} networks "
           f"({', '.join(n['name'] for n in ds['networks'])}) "
           f"-> {ds_out.relative_to(HERE.parent)}")
+
+    # Distributed slack WITH generator P limits (separate file; additive).
+    # Driven as a cascade of pandapower solves — see the note above
+    # PLIMIT_NETWORKS for why pandapower cannot be called directly.
+    pl = {"pandapower_version": pp.__version__,
+          "networks": dump_plimit_distributed_slack()}
+    pl_out = OUT_DIR / "distributed_slack_plimits.json"
+    pl_out.write_text(json.dumps(pl, indent=1))
+    for netdoc in pl["networks"]:
+        print(f"plimits/{netdoc['name']}: {netdoc['cascade_levels']} cascade level(s), "
+              f"pinned gens {netdoc['pinned_gen_indices']}")
+    print(f"distributed_slack_plimits: {len(pl['networks'])} networks "
+          f"-> {pl_out.relative_to(HERE.parent)}")
 
 
 if __name__ == "__main__":

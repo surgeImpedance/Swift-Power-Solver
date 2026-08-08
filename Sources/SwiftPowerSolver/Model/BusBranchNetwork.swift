@@ -88,13 +88,37 @@ public struct BusBranchNetwork: Equatable, Sendable {
         /// weights are normalized to sum to 1 across contributors and the power
         /// imbalance is shared proportionally. Used only by NewtonRaphsonSolver.
         public var slackWeight: Double?
+        /// Active-power regulating range, pu on the system base — how far
+        /// distributed slack may move this unit from `pPu`.
+        ///
+        /// `nil` ⇒ unbounded in that direction, the same convention `qMinPu` /
+        /// `qMaxPu` use with ±infinity: an unbounded unit is never pinned, so a
+        /// network with no limits set solves exactly as it did before these
+        /// fields existed.
+        ///
+        /// Read ONLY by the distributed-slack path. Single-slack is unaffected:
+        /// there the slack bus absorbs the island imbalance by definition, and
+        /// clamping it would leave the network unbalanced rather than model
+        /// anything physical.
+        ///
+        /// NOTE: pandapower does not enforce these. `runpp(distributed_slack=
+        /// True)` ignores `min_p_mw` / `max_p_mw` entirely — verified against
+        /// pandapower 3.2.1 both empirically and by inspection of
+        /// `pypower/newtonpf.py`, which contains no P-limit code. The pinning
+        /// convention below is therefore this package's own specification, and
+        /// is validated against pandapower by network equivalence rather than
+        /// by matching an upstream algorithm. See `DistributedSlackPLimitTests`.
+        public var pMinPu: Double?
+        public var pMaxPu: Double?
 
         public init(bus: Int, pPu: Double, vSetPu: Double, vaRefRad: Double = 0,
                     qMinPu: Double = -.infinity, qMaxPu: Double = .infinity,
                     inService: Bool = true,
                     scSubtransientRPu: Double? = nil,
                     scSubtransientXPu: Double? = nil,
-                    slackWeight: Double? = nil) {
+                    slackWeight: Double? = nil,
+                    pMinPu: Double? = nil,
+                    pMaxPu: Double? = nil) {
             self.bus = bus
             self.pPu = pPu
             self.vSetPu = vSetPu
@@ -105,6 +129,8 @@ public struct BusBranchNetwork: Equatable, Sendable {
             self.scSubtransientRPu = scSubtransientRPu
             self.scSubtransientXPu = scSubtransientXPu
             self.slackWeight = slackWeight
+            self.pMinPu = pMinPu
+            self.pMaxPu = pMaxPu
         }
     }
 
