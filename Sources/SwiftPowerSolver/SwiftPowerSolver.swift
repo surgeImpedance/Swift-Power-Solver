@@ -13,5 +13,14 @@
 //      slack buses, Accelerate sparse QR each iteration.
 //   Planned: DC power flow, N-1 contingency screening, short-circuit — all
 //   consuming the same `BusBranchNetwork` and Ybus.
+//
+// Fast-decoupled power flow (`FastDecoupledSolver`, XB/BX per MATPOWER makeB;
+// verified against pypower's makeB and the NR solutions) rides alongside as a
+// standalone method, a warm-start stage, and an auto-fallback for NR
+// divergence — all dispatched through `PowerFlowEngine`, which reports the
+// route taken in `PowerFlowSolution.solutionPath`/`stages` (no silent
+// fallbacks). B′/B″ are factorized once and cached across time-series steps
+// (`FDPFFactorizationCache`). The NR path is bit-identical to before FDPF
+// existed.
 
 import Foundation

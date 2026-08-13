@@ -16,17 +16,46 @@ public struct PowerFlowOptions: Sendable {
     /// field existed. Used by `TimeSeriesSweep` to warm-start each step.
     public var initialVmPu: [Double]?
     public var initialVaRad: [Double]?
+    /// Which solver runs (`PowerFlowEngine` dispatch). The default is plain
+    /// Newton-Raphson, bit-identical to before this field existed;
+    /// `NewtonRaphsonSolver` and `FastDecoupledSolver` called directly ignore
+    /// it. `.fastDecoupled` with `enforceQLimits` (or distributed slack) is
+    /// routed through the warm-start path so NR provides those features.
+    public var method: SolverMethod
+    /// B′/B″ construction variant for FDPF. BX (Van Amerongen) by default —
+    /// the more robust choice on high-r/x networks, which is the malformed-
+    /// network regime the fallback exists for.
+    public var fdpfVariant: FDPFVariant
+    /// When the selected method's primary attempt diverges, retry through the
+    /// FDPF recovery chain (warm start → NR, then full FDPF where feature-
+    /// equivalent). Off by default; never silent — see
+    /// `PowerFlowSolution.solutionPath`.
+    public var autoFallback: Bool
+    /// Bounds for the FDPF warm-start stage: it stops at whichever of the
+    /// loose tolerance / round cap comes first and hands its iterate to NR.
+    public var fdpfWarmStartMaxIterations: Int
+    public var fdpfWarmStartTolerancePu: Double
 
     public init(tolerancePu: Double = 1e-8,
                 maxIterations: Int = 30,
                 enforceQLimits: Bool = false,
                 initialVmPu: [Double]? = nil,
-                initialVaRad: [Double]? = nil) {
+                initialVaRad: [Double]? = nil,
+                method: SolverMethod = .newtonRaphson,
+                fdpfVariant: FDPFVariant = .bx,
+                autoFallback: Bool = false,
+                fdpfWarmStartMaxIterations: Int = 5,
+                fdpfWarmStartTolerancePu: Double = 1e-2) {
         self.tolerancePu = tolerancePu
         self.maxIterations = maxIterations
         self.enforceQLimits = enforceQLimits
         self.initialVmPu = initialVmPu
         self.initialVaRad = initialVaRad
+        self.method = method
+        self.fdpfVariant = fdpfVariant
+        self.autoFallback = autoFallback
+        self.fdpfWarmStartMaxIterations = fdpfWarmStartMaxIterations
+        self.fdpfWarmStartTolerancePu = fdpfWarmStartTolerancePu
     }
 }
 
@@ -78,6 +107,14 @@ public struct PowerFlowSolution: Sendable {
     /// declared able to regulate over. See the saturation note in
     /// `NewtonRaphsonSolver.solve`.
     public var pSaturatedGenIndices: Set<Int> = []
+    /// Which route produced this answer. Stamped by `PowerFlowEngine` (and by
+    /// `FastDecoupledSolver` for its own results); a `NewtonRaphsonSolver`
+    /// called directly leaves the inert default `.nr`. A fallback path here is
+    /// the signal that the primary method did not hold — no silent fallbacks.
+    public var solutionPath: SolutionPath = .nr
+    /// Per-stage iteration counts and exit mismatches for every stage the
+    /// engine attempted, in order. Empty for direct `NewtonRaphsonSolver` use.
+    public var stages: [SolveStage] = []
 }
 
 public protocol PowerFlowSolver {

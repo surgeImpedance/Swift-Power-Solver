@@ -48,6 +48,9 @@ public struct StepResult: Sendable {
     public let branchFlows: [BranchFlow]
     /// True if this step was warm-started from a previous converged step.
     public let warmStarted: Bool
+    /// Which route produced this step's answer (see `SolutionPath`). `.nr`
+    /// for every step of a default (Newton-Raphson, no-fallback) sweep.
+    public var solutionPath: SolutionPath = .nr
 }
 
 public struct TimeSeriesSweep {
@@ -66,13 +69,27 @@ public struct TimeSeriesSweep {
 
     /// Solve each step against `base`, warm-starting from the previous
     /// converged step. `initialGuess` seeds step 0 (otherwise step 0 flat-starts).
+    ///
+    /// When `options.method` involves FDPF (or `autoFallback` is on), steps go
+    /// through `PowerFlowEngine` with one shared `FDPFFactorizationCache`, so
+    /// B′/B″ are factorized exactly once for the whole sweep while topology
+    /// holds still — load and generator-P changes never invalidate them.
+    /// `fdpfCache` lets a caller inject (and afterwards inspect) that cache;
+    /// the default builds one internally.
     public func run(base: BusBranchNetwork,
                     steps: [LoadStep],
                     options: PowerFlowOptions = PowerFlowOptions(),
                     onNonConvergence: NonConvergencePolicy = .continueSweep,
-                    initialGuess: (vmPu: [Double], vaRad: [Double])? = nil)
+                    initialGuess: (vmPu: [Double], vaRad: [Double])? = nil,
+                    fdpfCache: FDPFFactorizationCache? = nil)
         -> [StepResult] {
         let solver = NewtonRaphsonSolver()
+        // The pure-NR default takes the exact pre-FDPF path through
+        // NewtonRaphsonSolver below; the engine is only in the loop when the
+        // options ask for something FDPF-shaped.
+        let usesFDPF = options.method != .newtonRaphson || options.autoFallback
+        let engine = PowerFlowEngine()
+        let cache = fdpfCache ?? (usesFDPF ? FDPFFactorizationCache() : nil)
         var results: [StepResult] = []
         results.reserveCapacity(steps.count)
 
@@ -88,11 +105,14 @@ public struct TimeSeriesSweep {
             opts.initialVmPu = warm?.vm
             opts.initialVaRad = warm?.va
 
-            let sol = solver.solve(net, options: opts)
+            let sol = usesFDPF
+                ? engine.solve(net, options: opts, fdpfCache: cache)
+                : solver.solve(net, options: opts)
             results.append(StepResult(
                 converged: sol.converged, failureReason: sol.failureReason,
                 iterations: sol.iterations, vmPu: sol.vmPu, vaRad: sol.vaRad,
-                branchFlows: sol.branchFlows, warmStarted: warmStarted))
+                branchFlows: sol.branchFlows, warmStarted: warmStarted,
+                solutionPath: sol.solutionPath))
 
             if sol.converged {
                 warm = (sol.vmPu, sol.vaRad)            // advance the warm source
