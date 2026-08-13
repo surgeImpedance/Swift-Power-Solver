@@ -13,28 +13,84 @@ public struct SparseComplexMatrix: Equatable, Sendable {
     public var nonZeroCount: Int { columns.count }
 
     /// Build from coordinate-form entries; duplicates are summed.
+    ///
+    /// Assembled with a two-pass LSD radix sort on (column, then row) rather
+    /// than the array-of-arrays plus one Dictionary per row this used to build.
+    /// Same reasoning as `SparseLinearSolver.compressToCSC`: O(nnz + n) with no
+    /// hashing and no per-row allocation.
+    ///
+    /// BIT-IDENTICAL. Each pass is stable, so entries end up ordered by (row,
+    /// column, original order) and each duplicate run is summed in the order it
+    /// was supplied — which is exactly the order the Dictionary accumulated in.
+    /// That matters here because a bus with parallel branches sums four
+    /// contributions per branch, and re-ordering that sum could move the last
+    /// bit of a Ybus entry the pandapower comparison checks.
     public init(n: Int, entries: [(row: Int, col: Int, value: ComplexD)]) {
-        var byRow: [[(col: Int, value: ComplexD)]] = Array(repeating: [], count: n)
-        for e in entries {
-            byRow[e.row].append((e.col, e.value))
-        }
-        var rowStarts = [Int](); rowStarts.reserveCapacity(n + 1)
+        let count = entries.count
+        var rowStarts = [Int](repeating: 0, count: n + 1)
         var columns = [Int]()
         var re = [Double]()
         var im = [Double]()
-        rowStarts.append(0)
-        for row in byRow {
-            // Sum duplicates, then emit in column order.
-            var acc: [Int: ComplexD] = [:]
-            for (c, v) in row { acc[c, default: .zero] += v }
-            for c in acc.keys.sorted() {
-                let v = acc[c]!
-                columns.append(c)
-                re.append(v.re)
-                im.append(v.im)
+
+        if count > 0 {
+            // Pass 1 — stable bucket by COLUMN.
+            var colStarts = [Int](repeating: 0, count: n + 1)
+            for e in entries { colStarts[e.col + 1] += 1 }
+            for i in 1...n { colStarts[i] += colStarts[i - 1] }
+            var byColRow = [Int](repeating: 0, count: count)
+            var byColCol = [Int](repeating: 0, count: count)
+            var byColRe = [Double](repeating: 0, count: count)
+            var byColIm = [Double](repeating: 0, count: count)
+            for e in entries {
+                let p = colStarts[e.col]
+                byColRow[p] = e.row
+                byColCol[p] = e.col
+                byColRe[p] = e.value.re
+                byColIm[p] = e.value.im
+                colStarts[e.col] = p + 1
             }
-            rowStarts.append(columns.count)
+
+            // Pass 2 — stable bucket by ROW. Column order survives, so each row
+            // comes out ascending by column.
+            var bucket = [Int](repeating: 0, count: n + 1)
+            for r in byColRow { bucket[r + 1] += 1 }
+            for i in 1...n { bucket[i] += bucket[i - 1] }
+            let sortedStarts = bucket
+            var cursor = bucket
+            var sortedCol = [Int](repeating: 0, count: count)
+            var sortedRe = [Double](repeating: 0, count: count)
+            var sortedIm = [Double](repeating: 0, count: count)
+            for k in 0..<count {
+                let r = byColRow[k]
+                let p = cursor[r]
+                sortedCol[p] = byColCol[k]
+                sortedRe[p] = byColRe[k]
+                sortedIm[p] = byColIm[k]
+                cursor[r] = p + 1
+            }
+
+            columns.reserveCapacity(count)
+            re.reserveCapacity(count)
+            im.reserveCapacity(count)
+            for row in 0..<n {
+                var k = sortedStarts[row]
+                let end = sortedStarts[row + 1]
+                while k < end {
+                    let c = sortedCol[k]
+                    var accRe = sortedRe[k], accIm = sortedIm[k]
+                    var j = k + 1
+                    while j < end && sortedCol[j] == c {
+                        accRe += sortedRe[j]; accIm += sortedIm[j]; j += 1
+                    }
+                    columns.append(c)
+                    re.append(accRe)
+                    im.append(accIm)
+                    k = j
+                }
+                rowStarts[row + 1] = columns.count
+            }
         }
+
         self.n = n
         self.rowStarts = rowStarts
         self.columns = columns
