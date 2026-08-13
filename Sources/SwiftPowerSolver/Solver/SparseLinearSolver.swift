@@ -78,23 +78,62 @@ enum SparseLinearSolver {
                         attributes: SparseAttributes_t(), blockSize: 1)
                     let matrix = SparseMatrix_Double(structure: structure,
                                                      data: vals.baseAddress!)
-                    let factorization = SparseFactor(SparseFactorizationQR, matrix)
-                    defer { SparseCleanup(factorization) }
-                    guard factorization.status == SparseStatusOK else { return }
 
-                    for rhs in rhsColumns {
-                        var b = rhs
-                        var x = [Double](repeating: 0, count: n)
-                        b.withUnsafeMutableBufferPointer { bp in
-                            x.withUnsafeMutableBufferPointer { xp in
-                                let bVec = DenseVector_Double(count: Int32(n),
-                                                              data: bp.baseAddress!)
-                                let xVec = DenseVector_Double(count: Int32(n),
-                                                              data: xp.baseAddress!)
-                                SparseSolve(factorization, bVec, xVec)
+                    // Columns are solved in parallel over FIXED chunks, and
+                    // every chunk builds its OWN QR factorization of the same
+                    // immutable CSC data. Bit identity holds because:
+                    //  - SparseFactor is deterministic (a fresh factorization
+                    //    reproduces the pinned goldens on every run), so the
+                    //    per-chunk factorizations are identical objects;
+                    //  - each column's solve is the same single-RHS
+                    //    SparseSolve arithmetic as the sequential original;
+                    //  - column c writes only slice c — no shared state, no
+                    //    reduction order for scheduling to disturb.
+                    // FactorsIdentityTests pins all of this against 24895bc.
+                    //
+                    // Variants tried and REJECTED, for the record:
+                    //  - One-call DenseMatrix_Double batch solve: ~4x faster
+                    //    on case300, but its blocked multi-column kernel
+                    //    reorders arithmetic — PTDF hash diverged.
+                    //  - SHARING one factorization across threads: races, even
+                    //    with per-call explicit workspaces (run-to-run hash
+                    //    instability) — the factorization's static workspace
+                    //    region is not shareable. Hence: nothing is shared.
+                    let m = rhsColumns.count
+                    let chunkCount = max(1, min(m,
+                        ProcessInfo.processInfo.activeProcessorCount))
+                    let per = (m + chunkCount - 1) / chunkCount
+                    var solveFailed = false
+                    var xFlat = [Double](repeating: 0, count: n * m)
+                    xFlat.withUnsafeMutableBufferPointer { xp in
+                        let xBase = xp.baseAddress!
+                        let failLock = NSLock()
+                        DispatchQueue.concurrentPerform(iterations: chunkCount) { chunk in
+                            let lo = chunk * per
+                            let hi = Swift.min(m, lo + per)
+                            guard lo < hi else { return }
+                            let factorization = SparseFactor(SparseFactorizationQR, matrix)
+                            defer { SparseCleanup(factorization) }
+                            guard factorization.status == SparseStatusOK else {
+                                failLock.lock(); solveFailed = true; failLock.unlock()
+                                return
+                            }
+                            for c in lo..<hi {
+                                var b = rhsColumns[c]
+                                b.withUnsafeMutableBufferPointer { bp in
+                                    let bVec = DenseVector_Double(count: Int32(n),
+                                                                  data: bp.baseAddress!)
+                                    let xVec = DenseVector_Double(count: Int32(n),
+                                                                  data: xBase + c * n)
+                                    SparseSolve(factorization, bVec, xVec)
+                                }
                             }
                         }
-                        solutions.append(x)
+                    }
+                    guard !solveFailed else { return }
+                    solutions.reserveCapacity(m)
+                    for c in 0..<m {
+                        solutions.append(Array(xFlat[c * n ..< (c + 1) * n]))
                     }
                     ok = true
                 }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // PTDF / LODF linear sensitivity factors, built on the DC model (Piece 2).
 //
@@ -61,8 +62,20 @@ public struct DistributionFactors {
     // MARK: - Build
 
     public static func build(_ net: BusBranchNetwork) -> DistributionFactors {
+        // The nil-hook build cannot be cancelled, so the force-unwrap is total.
+        buildCancellable(net, isCancelled: nil)!
+    }
+
+    /// `build`, with a cooperative cancellation hook. `isCancelled` is polled
+    /// between stages and once per parallel row chunk; a true return abandons
+    /// the build and yields nil. Additive API: `build(_:)` forwards here, and
+    /// existing callers are untouched.
+    public static func buildCancellable(_ net: BusBranchNetwork,
+                                        isCancelled: (@Sendable () -> Bool)?)
+                                        -> DistributionFactors? {
         let n = net.busCount
         let nbr = net.branches.count
+        let cancelled = { isCancelled?() ?? false }
 
         // Live / slack classification, matching DCPowerFlowSolver: only
         // `.isolated` buses are dead, and `.slack` buses are the references.
@@ -81,11 +94,17 @@ public struct DistributionFactors {
         var reducedIndex = [Int](repeating: -1, count: n)
         for (r, bus) in pvpq.enumerated() { reducedIndex[bus] = r }
 
-        // X = Bbus[pvpq,pvpq]⁻¹, one column per non-slack live bus. Slack and
-        // dead buses keep zero columns (PTDF is measured relative to the slack).
-        var xColumns = [[Double]](repeating: [Double](repeating: 0, count: n),
-                                  count: n)
+        let signposter = OSSignposter(subsystem: "SwiftPowerSolver", category: "factors")
+
+        // X = Bbus[pvpq,pvpq]⁻¹, stored ROW-major and flat: xFlat[i*n + j] is
+        // X[bus i, injection-column j]. Row-major because the PTDF stage reads
+        // X along rows f_k and t_k — flat sequential runs instead of the
+        // former array-of-columns pointer chase (which was ~10% of a 9241
+        // build by itself). Slack and dead buses keep zero rows/columns
+        // (PTDF is measured relative to the slack).
+        var xFlat = [Double](repeating: 0, count: n * n)
         if !pvpq.isEmpty {
+            let spSolve = signposter.beginInterval("solve")
             var entries: [(row: Int, col: Int, value: Double)] = []
             entries.reserveCapacity(pvpq.count * 4)
             for (r, i) in pvpq.enumerated() {
@@ -104,41 +123,93 @@ public struct DistributionFactors {
             if let solved = SparseLinearSolver.solve(
                 n: pvpq.count, entries: entries, rhsColumns: rhs) {
                 for (c, bus) in pvpq.enumerated() {
-                    var column = [Double](repeating: 0, count: n)
-                    for (r, i) in pvpq.enumerated() { column[i] = solved[c][r] }
-                    xColumns[bus] = column
+                    for (r, i) in pvpq.enumerated() {
+                        xFlat[i * n + bus] = solved[c][r]
+                    }
+                }
+            }
+            signposter.endInterval("solve", spSolve)
+        }
+        if cancelled() { return nil }
+
+        // PTDF[k, j] = b_k · (X[f_k, j] − X[t_k, j]), branch rows in parallel.
+        // Each row k writes only its own slice and each element is the same
+        // two loads, subtract, multiply as the sequential original, in the
+        // same j order — fixed partitioning, no accumulation, so parallel
+        // execution is bit-identical (pinned by FactorsIdentityTests).
+        let spPtdf = signposter.beginInterval("ptdf")
+        var ptdf = [Double](repeating: 0, count: nbr * n)
+        let branches = net.branches
+        let bSeries = model.bSeries
+        ptdf.withUnsafeMutableBufferPointer { pp in
+            let pBase = pp.baseAddress!
+            xFlat.withUnsafeBufferPointer { xp in
+                let xBase = xp.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: nbr) { k in
+                    guard !cancelled() else { return }
+                    let b = bSeries[k]
+                    guard b != 0 else { return }
+                    let fRow = xBase + branches[k].from * n
+                    let tRow = xBase + branches[k].to * n
+                    let out = pBase + k * n
+                    for j in 0..<n {
+                        out[j] = b * (fRow[j] - tRow[j])
+                    }
                 }
             }
         }
+        signposter.endInterval("ptdf", spPtdf)
+        if cancelled() { return nil }
 
-        // PTDF[k, j] = b_k · (X[f_k, j] − X[t_k, j]).
-        var ptdf = [Double](repeating: 0, count: nbr * n)
-        for (k, branch) in net.branches.enumerated() {
-            let b = model.bSeries[k]
-            guard b != 0 else { continue }
-            for j in 0..<n {
-                let column = xColumns[j]
-                ptdf[k * n + j] = b * (column[branch.from] - column[branch.to])
-            }
-        }
-
-        // LODF from PTDF, with the islanding guard.
+        // LODF from PTDF, with the islanding guard. Per-outage terms (f, t,
+        // 1/(1−h) as the ORIGINAL division — see below) are precomputed in
+        // branch order, then monitored ROWS fill in parallel: row-major
+        // sequential writes instead of the former column-strided fill
+        // (stride nbr·8 bytes ≈ 128 KB on case9241 — the cache-hostile
+        // pattern that made this stage 21% of the build).
+        //
+        // Arithmetic note: each element is computed as
+        // (ptdf[m,f] − ptdf[m,t]) / den — the division kept per element, NOT
+        // hoisted to a reciprocal multiply, because x/den and x·(1/den) can
+        // differ in the last bit and identity is the bar.
+        let spLodf = signposter.beginInterval("lodf")
         var lodf = [Double](repeating: 0, count: nbr * nbr)
         var islanding = [Bool](repeating: false, count: nbr)
+        struct Outage { var f = 0; var t = 0; var den = 0.0; var active = false }
+        var outages = [Outage](repeating: Outage(), count: nbr)
         for (k, branch) in net.branches.enumerated() {
+            guard bSeries[k] != 0 else { continue }         // out of service / dead
             let f = branch.from, t = branch.to
-            guard model.bSeries[k] != 0 else { continue }   // out of service / dead
             let h = ptdf[k * n + f] - ptdf[k * n + t]
             let den = 1 - h
             if abs(den) < islandingEpsilon {
-                islanding[k] = true
-                continue                                    // column stays zero
+                islanding[k] = true                          // column stays zero
+                continue
             }
-            for m in 0..<nbr {
-                lodf[m * nbr + k] = (ptdf[m * n + f] - ptdf[m * n + t]) / den
-            }
-            lodf[k * nbr + k] = -1
+            outages[k] = Outage(f: f, t: t, den: den, active: true)
         }
+        lodf.withUnsafeMutableBufferPointer { lp in
+            let lBase = lp.baseAddress!
+            ptdf.withUnsafeBufferPointer { pp in
+                let pBase = pp.baseAddress!
+                outages.withUnsafeBufferPointer { op in
+                    let oBase = op.baseAddress!
+                    DispatchQueue.concurrentPerform(iterations: nbr) { m in
+                        guard !cancelled() else { return }
+                        let row = lBase + m * nbr
+                        let pRow = pBase + m * n
+                        for k in 0..<nbr {
+                            let o = oBase[k]
+                            guard o.active else { continue }
+                            row[k] = (pRow[o.f] - pRow[o.t]) / o.den
+                        }
+                        if oBase[m].active { row[m] = -1 }
+                    }
+                }
+            }
+        }
+        signposter.endInterval("lodf", spLodf)
+        if cancelled() { return nil }
 
         return DistributionFactors(
             busCount: n, branchCount: nbr,
