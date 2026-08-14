@@ -115,6 +115,11 @@ public struct PowerFlowSolution: Sendable {
     /// Per-stage iteration counts and exit mismatches for every stage the
     /// engine attempted, in order. Empty for direct `NewtonRaphsonSolver` use.
     public var stages: [SolveStage] = []
+    /// Q-limit re-pin cycles: how many times the outer loop pinned at least
+    /// one generator and re-solved. 0 means the first inner solve's pinning
+    /// check found no violations (`enforceQLimits` off always reports 0).
+    /// Direct evidence of how much of `iterations` is PV→PQ restart cost.
+    public var qLimitRestarts: Int = 0
 }
 
 public protocol PowerFlowSolver {

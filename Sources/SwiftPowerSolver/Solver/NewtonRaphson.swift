@@ -118,6 +118,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         var pinnedQOfGen = [Int: Double]()                   // gen -> limit it sits at
         var pinnedQAtBus = [Double](repeating: 0, count: n)  // sum of pinned gen Q
         var totalIterations = 0
+        var qLimitRestartCount = 0                           // outer re-pin cycles
         var pCalc = [Double](repeating: 0, count: n)
         var qCalc = [Double](repeating: 0, count: n)
 
@@ -275,6 +276,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
 
             // Check reactive limits at PV buses (pandapower checks after
             // convergence and re-solves; slack gens are never limited).
+            var qPinnedThisPass = false
             for i in pv {
                 let unpinned = gensAtBus[i].filter { !pinnedGens.contains($0) }
                 guard !unpinned.isEmpty else { continue }
@@ -289,6 +291,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                         pinnedQAtBus[i] += net.generators[g].qMaxPu
                     }
                     violations = true
+                    qPinnedThisPass = true
                 } else if qNeeded < qMin {
                     for g in unpinned {
                         pinnedGens.insert(g)
@@ -296,8 +299,10 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                         pinnedQAtBus[i] += net.generators[g].qMinPu
                     }
                     violations = true
+                    qPinnedThisPass = true
                 }
             }
+            if qPinnedThisPass { qLimitRestartCount += 1 }
             if !violations { break }
         }
 
@@ -357,7 +362,8 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             vmPu: vmOut, vaRad: vaOut, branchFlows: flows,
             genPPu: genP, genQPu: genQ, pinnedGenIndices: pinnedGens,
             pLimitedGenIndices: pPinnedGens,
-            pSaturatedGenIndices: pSaturatedGens)
+            pSaturatedGenIndices: pSaturatedGens,
+            qLimitRestarts: qLimitRestartCount)
     }
 
     // MARK: - Inner Newton iteration

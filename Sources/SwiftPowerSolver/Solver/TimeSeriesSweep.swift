@@ -51,6 +51,15 @@ public struct StepResult: Sendable {
     /// Which route produced this step's answer (see `SolutionPath`). `.nr`
     /// for every step of a default (Newton-Raphson, no-fallback) sweep.
     public var solutionPath: SolutionPath = .nr
+    /// Q-limit re-pin cycles for this step (see
+    /// `PowerFlowSolution.qLimitRestarts`).
+    public var qLimitRestarts: Int = 0
+    /// True when this step ran with the recovery chain suppressed because the
+    /// previous step's full chain had already failed — see
+    /// `run(...)`'s `skipRecoveryAfterFailedStep`. A converged step with this
+    /// set is an ordinary primary-method solve; a failed one did NOT retry the
+    /// fallback ladder, and its `failureReason` says so.
+    public var recoverySkipped: Bool = false
 }
 
 public struct TimeSeriesSweep {
@@ -76,12 +85,34 @@ public struct TimeSeriesSweep {
     /// holds still — load and generator-P changes never invalidate them.
     /// `fdpfCache` lets a caller inject (and afterwards inspect) that cache;
     /// the default builds one internally.
+    ///
+    /// FALLBACK ECONOMY (`skipRecoveryAfterFailedStep`, default ON). Measured
+    /// on case9241pegase (2026-08-14): when a sweep enters an infeasible
+    /// regime — e.g. uniformly scaled loads that no single slack can balance —
+    /// EVERY step re-runs the full recovery ladder (primary NR, FDPF warm
+    /// start → NR, cold retry) only to rediscover its neighbor's divergence,
+    /// at ~65 wasted iterations a step. With economy on, a step whose
+    /// PREDECESSOR failed the full chain runs the primary method alone
+    /// (Newton-Raphson — or standalone FDPF when that IS the method — with
+    /// `autoFallback` off); the moment any step converges, full behavior
+    /// resumes. Consequences, stated plainly:
+    ///   - Steps the primary method can solve are BIT-IDENTICAL with economy
+    ///     on or off — the economized attempt is the same first attempt the
+    ///     full chain would have made, from the same warm start.
+    ///   - A step that only the fallback ladder could recover, sitting
+    ///     immediately after a failed step, reports failure instead (its
+    ///     `failureReason` and `recoverySkipped` say the ladder was skipped).
+    ///     Regime recovery is still detected through the primary attempt.
+    ///   - The first step never economizes, and neither does any step whose
+    ///     predecessor converged. Pass `false` to diagnose with the full
+    ///     chain on every step.
     public func run(base: BusBranchNetwork,
                     steps: [LoadStep],
                     options: PowerFlowOptions = PowerFlowOptions(),
                     onNonConvergence: NonConvergencePolicy = .continueSweep,
                     initialGuess: (vmPu: [Double], vaRad: [Double])? = nil,
-                    fdpfCache: FDPFFactorizationCache? = nil)
+                    fdpfCache: FDPFFactorizationCache? = nil,
+                    skipRecoveryAfterFailedStep: Bool = true)
         -> [StepResult] {
         let solver = NewtonRaphsonSolver()
         // The pure-NR default takes the exact pre-FDPF path through
@@ -98,6 +129,11 @@ public struct TimeSeriesSweep {
         // non-converged step, so its divergent iterates never seed a successor.
         var warm: (vm: [Double], va: [Double])? = initialGuess.map { ($0.vmPu, $0.vaRad) }
 
+        // True after a step failed its FULL chain (never set by an economized
+        // failure alone — economy only ever follows a full-chain verdict, so
+        // consecutive skips are all anchored to one real diagnosis).
+        var previousChainFailed = false
+
         for step in steps {
             let net = apply(step, to: base)
             var opts = options
@@ -105,19 +141,36 @@ public struct TimeSeriesSweep {
             opts.initialVmPu = warm?.vm
             opts.initialVaRad = warm?.va
 
-            let sol = usesFDPF
+            // Fallback economy: predecessor's chain failed, so run the primary
+            // attempt only. Identical to the chain's own first attempt for
+            // NR-shaped methods; standalone FDPF keeps its method.
+            let economize = skipRecoveryAfterFailedStep && previousChainFailed && usesFDPF
+            if economize {
+                opts.method = options.method == .fastDecoupled ? .fastDecoupled : .newtonRaphson
+                opts.autoFallback = false
+            }
+
+            var sol = usesFDPF
                 ? engine.solve(net, options: opts, fdpfCache: cache)
                 : solver.solve(net, options: opts)
+            if economize && !sol.converged {
+                sol.failureReason = (sol.failureReason ?? "did not converge")
+                    + " (recovery chain skipped: previous step's chain already failed)"
+            }
             results.append(StepResult(
                 converged: sol.converged, failureReason: sol.failureReason,
                 iterations: sol.iterations, vmPu: sol.vmPu, vaRad: sol.vaRad,
                 branchFlows: sol.branchFlows, warmStarted: warmStarted,
-                solutionPath: sol.solutionPath))
+                solutionPath: sol.solutionPath,
+                qLimitRestarts: sol.qLimitRestarts,
+                recoverySkipped: economize))
 
             if sol.converged {
                 warm = (sol.vmPu, sol.vaRad)            // advance the warm source
-            } else if onNonConvergence == .halt {
-                break
+                previousChainFailed = false
+            } else {
+                if !economize { previousChainFailed = true }
+                if onNonConvergence == .halt { break }
             }
             // On continue: leave `warm` at the last converged step (or nil).
         }
