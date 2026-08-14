@@ -23,6 +23,16 @@ public struct LoadStep: Sendable, Equatable {
         public init(pPu: Double, qPu: Double) { self.pPu = pPu; self.qPu = qPu }
     }
 
+    /// Absolute per-bus shunt admittance for a step (switched reactive
+    /// support: capacitor banks in on the ramp, reactors in at the valley).
+    /// Constant-impedance semantics are preserved — these land in `Bus.gsPu`
+    /// / `Bus.bsPu` and thence the Ybus diagonal, so injection stays V²·B.
+    public struct BusShunt: Sendable, Equatable {
+        public var gsPu: Double
+        public var bsPu: Double
+        public init(gsPu: Double, bsPu: Double) { self.gsPu = gsPu; self.bsPu = bsPu }
+    }
+
     /// Absolute per-bus load for this step, pu on the system base. Buses not
     /// listed keep the base network's load (supports both uniform profiles —
     /// list every bus scaled — and non-uniform / RL per-bus variation).
@@ -30,11 +40,20 @@ public struct LoadStep: Sendable, Equatable {
     /// Optional generator active-power setpoint overrides for this step, pu,
     /// keyed by generator index. Buses/gens not listed keep the base setpoint.
     public var genPOverridesPu: [Int: Double]
+    /// Optional per-bus shunt overrides for this step, pu at V = 1. Buses not
+    /// listed keep the base network's shunts — an empty map (the default) is
+    /// exactly the pre-existing fixed-shunt behavior. NOTE for FDPF sweeps:
+    /// B″ depends on bus susceptance, so shunt-varying steps invalidate the
+    /// `FDPFFactorizationCache` per step (its key already covers `bsPu`);
+    /// load-only steps keep the factor-once behavior unchanged.
+    public var busShuntsPu: [Int: BusShunt]
 
     public init(busLoads: [Int: BusLoad] = [:],
-                genPOverridesPu: [Int: Double] = [:]) {
+                genPOverridesPu: [Int: Double] = [:],
+                busShuntsPu: [Int: BusShunt] = [:]) {
         self.busLoads = busLoads
         self.genPOverridesPu = genPOverridesPu
+        self.busShuntsPu = busShuntsPu
     }
 }
 
@@ -177,7 +196,8 @@ public struct TimeSeriesSweep {
         return results
     }
 
-    /// Apply a step's load / generation overrides to a copy of the base network.
+    /// Apply a step's load / generation / shunt overrides to a copy of the
+    /// base network.
     private func apply(_ step: LoadStep, to base: BusBranchNetwork) -> BusBranchNetwork {
         var net = base
         for (bus, load) in step.busLoads where bus >= 0 && bus < net.buses.count {
@@ -186,6 +206,10 @@ public struct TimeSeriesSweep {
         }
         for (g, p) in step.genPOverridesPu where g >= 0 && g < net.generators.count {
             net.generators[g].pPu = p
+        }
+        for (bus, sh) in step.busShuntsPu where bus >= 0 && bus < net.buses.count {
+            net.buses[bus].gsPu = sh.gsPu
+            net.buses[bus].bsPu = sh.bsPu
         }
         return net
     }
