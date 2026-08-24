@@ -9,6 +9,17 @@ import XCTest
 ///   SPS_FACTORS_CASES=/abs/factors_case300.json,/abs/factors_case1354.json,…
 ///   swift test -c release --filter FactorsIdentityTests
 ///
+/// Generate the fixtures with `Tools/dump_factors_fixture.py` (one command;
+/// they are regenerable and deliberately not committed):
+///
+///     python Tools/dump_factors_fixture.py --out-dir /tmp case300 case1354pegase case9241pegase
+///
+/// Verified 2026-08-24: regenerated fixtures reproduce all three goldens
+/// EXACTLY on pandapower 3.2.1, so a hash mismatch means the code moved, not
+/// the fixture. Absent the fixtures this test SKIPS — which is how a gate named
+/// never-regress in CLAUDE.md came to be silently unrunnable in a fresh
+/// checkout.
+///
 /// Each fixture is the network-only portion of tools/dump_reference.py output
 /// (buses/branches/gens/base — the factors build never reads a solution).
 /// The test builds the factors, hashes the FULL ptdf and lodf matrices plus
