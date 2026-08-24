@@ -151,4 +151,200 @@ final class SingularFactorsTests: XCTestCase {
 
         XCTAssertGreaterThan(rows.count, 0, "no healthy fixture was measured")
     }
+
+    // MARK: - C2: is the residual distribution BIMODAL or CONTINUOUS?
+    //
+    // Everything measured so far is either healthy (~1e-14) or fully
+    // rank-deficient (1.0), and a 9.0e13x gap makes the threshold VALUE
+    // insensitive. The design question is therefore not which number to pick,
+    // it is whether anything lands in the gap. If nearly-singular systems sit
+    // in the gap, one threshold separates cleanly forever. If they smear
+    // continuously across it, a scalar threshold is the wrong control and the
+    // classification has to key on something structural instead.
+
+    /// Two 2-bus islands joined by ONE tie branch whose reactance is swept.
+    /// As `xTie` grows, `b_tie = 1/x` goes to zero and the two islands decouple
+    /// continuously — the network approaches, without ever reaching, the
+    /// rank-deficient `twoIslandOneSlack` fixture. `nil` omits the tie entirely,
+    /// which IS that fixture.
+    private func gradedTie(xTie: Double?) -> BusBranchNetwork {
+        var branches: [BusBranchNetwork.Branch] = [
+            .init(from: 0, to: 1, r: 0.01, x: 0.10),
+            .init(from: 2, to: 3, r: 0.01, x: 0.10),
+        ]
+        if let xTie { branches.append(.init(from: 1, to: 2, r: 0.01, x: xTie)) }
+        return BusBranchNetwork(
+            baseMVA: 100,
+            buses: [
+                .init(type: .slack, baseKv: 138),
+                .init(type: .pq, baseKv: 138, pLoadPu: 0.5),
+                .init(type: .pq, baseKv: 138, pLoadPu: 0.3),
+                .init(type: .pq, baseKv: 138, pLoadPu: 0.2),
+            ],
+            branches: branches,
+            generators: [.init(bus: 0, pPu: 1.0, vSetPu: 1.0)])
+    }
+
+    func testResidualSpreadIsBimodalOrContinuous() throws {
+        note("D65 C2: tie reactance sweep — weak coupling approaching rank deficiency")
+        note("D65 C2: xTie          b_tie        worst residual   islanding   max|PTDF|")
+
+        var residuals: [(x: Double, residual: Double)] = []
+        let sweep: [Double] = [1e-9, 1e-6, 1e-3, 1e-1, 1e0, 1e2, 1e4, 1e6,
+                               1e8, 1e10, 1e12, 1e14, 1e16]
+        for x in sweep {
+            let net = gradedTie(xTie: x)
+            guard let residual = Self.worstColumnResidual(net) else {
+                note("D65 C2: xTie=\(x) -> solve reported FAILURE (nil)")
+                continue
+            }
+            let f = DistributionFactors.build(net)
+            var maxAbs = 0.0
+            for k in 0..<net.branches.count {
+                for j in 0..<net.busCount {
+                    maxAbs = max(maxAbs, abs(f.ptdf(branch: k, bus: j)))
+                }
+            }
+            let isl = (0..<net.branches.count).map { f.isIslanding(outage: $0) }
+            residuals.append((x, residual))
+            note(String(format: "D65 C2: %-12.0e  %-11.3e  %-15.6e  %@  %.4f",
+                        x, 1.0 / x, residual, String(describing: isl), maxAbs))
+        }
+
+        // The fully rank-deficient endpoint, for the gap it has to be compared to.
+        if let disconnected = Self.worstColumnResidual(gradedTie(xTie: nil)) {
+            note(String(format: "D65 C2: (no tie)      0            %-15.6e  "
+                        + "<- fully rank-deficient endpoint", disconnected))
+        }
+
+        // Where does the distribution actually sit? Report the largest jump
+        // between consecutive points, which is what a gap looks like.
+        var worstJump = 0.0
+        var jumpAt = ""
+        for i in 1..<residuals.count {
+            let a = max(residuals[i - 1].residual, 1e-300)
+            let b = max(residuals[i].residual, 1e-300)
+            let ratio = b / a
+            if ratio > worstJump {
+                worstJump = ratio
+                jumpAt = "\(residuals[i - 1].x) -> \(residuals[i].x)"
+            }
+        }
+        note(String(format: "D65 C2: largest consecutive jump = %.3e x, at xTie %@",
+                    worstJump, jumpAt))
+        let maxResidual = residuals.map(\.residual).max() ?? 0
+        note(String(format: "D65 C2: worst residual anywhere in the graded family = %.6e",
+                    maxResidual))
+
+        XCTAssertFalse(residuals.isEmpty, "the sweep measured nothing")
+    }
+
+    /// The scale measurement D65 §0 deferred, now decision-relevant: C2 showed
+    /// the first islanding MISCLASSIFICATION appears around a residual of
+    /// 3.7e-9. A scalar threshold can only be the control if healthy networks
+    /// AT SCALE stay well below that. Reads the same fixtures as
+    /// FactorsIdentityTests.
+    func testHealthyResidualAtScale() throws {
+        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
+            XCTFail("SPS_FACTORS_CASES unset — cannot measure the at-scale residual. "
+                    + "Regenerate with Tools/dump_factors_fixture.py")
+            return
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        for path in paths.split(separator: ",").map(String.init) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            let fixture = try decoder.decode(ScaleFixture.self, from: data)
+            let net = fixture.network()
+            let t0 = ContinuousClock.now
+            let residual = Self.worstColumnResidual(net)
+            let dt = ContinuousClock.now - t0
+            let ms = Double(dt.components.seconds) * 1000
+                   + Double(dt.components.attoseconds) / 1e15
+            note(String(format: "D65 SCALE %@: buses=%d branches=%d "
+                        + "worst||B_red·x − e||inf = %@  (%.0f ms)",
+                        fixture.name, net.busCount, net.branches.count,
+                        residual.map { String(format: "%.6e", $0) } ?? "nil (solve failed)",
+                        ms))
+        }
+    }
+
+    /// Mirror of FactorsIdentityTests.NetworkFixture — same JSON, decoded here
+    /// so the two tests do not have to share a private type.
+    private struct ScaleFixture: Decodable {
+        struct B: Decodable { var i: Int; var type: Int; var pdMw, qdMvar, gsMw, bsMvar, baseKv: Double }
+        struct R: Decodable { var f, t: Int; var r, x, b, g, tap, shiftDeg: Double; var status: Int }
+        struct G: Decodable { var bus: Int; var pgMw, qmaxMvar, qminMvar, vgPu, vaDeg: Double; var status: Int }
+        var name: String
+        var baseMva: Double
+        var buses: [B]
+        var branches: [R]
+        var gens: [G]
+
+        func network() -> BusBranchNetwork {
+            BusBranchNetwork(
+                baseMVA: baseMva,
+                buses: buses.map {
+                    BusBranchNetwork.Bus(type: BusBranchNetwork.BusType(rawValue: $0.type) ?? .pq,
+                                         baseKv: $0.baseKv,
+                                         pLoadPu: $0.pdMw / baseMva, qLoadPu: $0.qdMvar / baseMva,
+                                         gsPu: $0.gsMw / baseMva, bsPu: $0.bsMvar / baseMva)
+                },
+                branches: branches.map {
+                    BusBranchNetwork.Branch(from: $0.f, to: $0.t, r: $0.r, x: $0.x, b: $0.b, g: $0.g,
+                                            tap: $0.tap <= 0 ? 1.0 : $0.tap,
+                                            shiftRad: $0.shiftDeg * .pi / 180,
+                                            inService: $0.status == 1)
+                },
+                generators: gens.map {
+                    BusBranchNetwork.Generator(bus: $0.bus, pPu: $0.pgMw / baseMva, vSetPu: $0.vgPu,
+                                               vaRefRad: $0.vaDeg * .pi / 180,
+                                               qMinPu: $0.qminMvar / baseMva,
+                                               qMaxPu: $0.qmaxMvar / baseMva,
+                                               inService: $0.status == 1)
+                })
+        }
+    }
+
+    /// Locate the misclassification ONSET precisely, and separate the two
+    /// quantities that C2's decade sweep conflated:
+    ///
+    ///   - the RESIDUAL, a proxy for how badly conditioned the solve was;
+    ///   - `|1 − h_k|`, which is what `islandingEpsilon` (1e-9) actually tests.
+    ///
+    /// Every branch of the 0-1-2-3 path is a bridge, so `h_k = 1` EXACTLY in
+    /// arithmetic, for every tie reactance. Any drift is numerical error, and
+    /// the classification flips the moment that error exceeds 1e-9. The
+    /// threshold question is whether the residual can see that flip coming.
+    func testMisclassificationOnset() throws {
+        note("D65 ONSET: xTie        residual        |1-h_tie|       tie classified")
+        var lastGood: (x: Double, residual: Double, h: Double)?
+        var firstBad: (x: Double, residual: Double, h: Double)?
+
+        var x = 1e3
+        while x <= 1e8 {
+            let net = gradedTie(xTie: x)
+            let residual = Self.worstColumnResidual(net) ?? .nan
+            let f = DistributionFactors.build(net)
+            // tie is branch index 2, from bus 1 to bus 2
+            let h = f.ptdf(branch: 2, bus: 1) - f.ptdf(branch: 2, bus: 2)
+            let dev = abs(1 - h)
+            let islanding = f.isIslanding(outage: 2)
+            note(String(format: "D65 ONSET: %-10.2e  %-14.6e  %-14.6e  %@",
+                        x, residual, dev, islanding ? "islanding (correct)" : "MESHED (WRONG)"))
+            if islanding { lastGood = (x, residual, dev) }
+            else if firstBad == nil { firstBad = (x, residual, dev) }
+            x *= pow(10, 0.5)
+        }
+
+        if let g = lastGood, let b = firstBad {
+            note(String(format: "D65 ONSET: last correct  xTie=%.2e residual=%.6e |1-h|=%.6e",
+                        g.x, g.residual, g.h))
+            note(String(format: "D65 ONSET: first WRONG   xTie=%.2e residual=%.6e |1-h|=%.6e",
+                        b.x, b.residual, b.h))
+            note(String(format: "D65 ONSET: worst healthy at scale = 9.734435e-13 (case9241); "
+                        + "margin to first wrong residual = %.1f x", b.residual / 9.734435e-13))
+        }
+        XCTAssertNotNil(firstBad, "the sweep never reached a misclassification")
+    }
 }

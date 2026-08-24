@@ -78,8 +78,24 @@ final class FactorsIdentityTests: XCTestCase {
     }
 
     func testBuildIdentity() throws {
+        // FAILS, does not skip (C3). A control that quietly abstains when its
+        // inputs are missing has the failure mode of the thing it was built to
+        // prevent: this gate is named never-regress in CLAUDE.md and was
+        // silently unrunnable in a fresh checkout for an unknown span, because
+        // a skip is indistinguishable from a pass in every summary view.
         guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
-            throw XCTSkip("SPS_FACTORS_CASES unset — set to comma-separated fixture paths")
+            XCTFail("""
+                SPS_FACTORS_CASES unset — the bit-identity gate cannot run.
+                This is a FAILURE, not a skip: an absent fixture must not read \
+                as a pass. Regenerate (about 30 s) and re-run:
+
+                  python Tools/dump_factors_fixture.py --out-dir /tmp \
+                      case300 case1354pegase case9241pegase
+                  SPS_FACTORS_CASES=/tmp/factors_case300.json,\
+                /tmp/factors_case1354.json,/tmp/factors_case9241.json \
+                      swift test -c release --filter FactorsIdentityTests
+                """)
+            return
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
