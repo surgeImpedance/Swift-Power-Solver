@@ -88,10 +88,21 @@ public struct PTDFResult: Sendable {
         case dense([Double])          // row-major, branchOrder x busOrder
     }
     let storage: Storage
+
+    /// **Provenance for the flat export (R3).** The nodal-balance residual the
+    /// engine measured for this build, or `nil` when the control was disabled.
+    ///
+    /// It DECIDES NOTHING here — control 2 already accepted this result, or it
+    /// would not exist. It is carried because the residual is the ONLY signal
+    /// that a PTDF matrix is numerically hollow, and `rowMajorValues()` strips
+    /// every other channel by construction. See that method.
+    public let solveResidual: Double?
     var busCount: Int { busOrder.count }
 
     init(basis: SensitivityBasis, slack: SlackReference, signature: FactorsSignature,
-         branchOrder: [BranchID], busOrder: [BusID], storage: Storage) {
+         branchOrder: [BranchID], busOrder: [BusID], storage: Storage,
+         solveResidual: Double?) {
+        self.solveResidual = solveResidual
         self.basis = basis; self.slack = slack; self.signature = signature
         self.branchOrder = branchOrder; self.busOrder = busOrder; self.storage = storage
     }
@@ -147,6 +158,22 @@ public struct PTDFResult: Sendable {
 
     /// Flat row-major sensitivities in `(branchOrder × busOrder)` order, for RL
     /// feature assembly. Derivatives, never flows.
+    ///
+    /// **ACCEPTED RISK, stated here because this method is where it lands (R3).**
+    /// All three controls can pass on a numerically degraded matrix: control 1
+    /// (connectivity) is structural and reports correctly at any conditioning;
+    /// control 2 (residual) is a COARSE garbage-solve guard whose tolerance
+    /// necessarily cuts a continuum and which measurably accepts columns with
+    /// several digits gone; control 3 (the conditioning annotation) lives on
+    /// `LODFResult` and decides nothing by design.
+    ///
+    /// **A flat `[Double]` strips every one of those channels.** The consumer
+    /// this method exists for — RL feature assembly — is structurally the one
+    /// that cannot see the only warning the system emits. So: **a caller using
+    /// this array is required to carry `solveResidual` alongside it** and to
+    /// decide, explicitly, what its pipeline does with a degraded build. The
+    /// requirement is stated rather than enforced because enforcing it would
+    /// make the annotation a gate, which is the control D65 §4 removed.
     public func rowMajorValues() -> [Double] {
         switch storage {
         case .dense(let v): return v

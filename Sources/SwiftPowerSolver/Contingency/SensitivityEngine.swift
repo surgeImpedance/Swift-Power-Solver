@@ -35,16 +35,19 @@ public struct SensitivityEngine: Sendable {
         let branchOrder = (0..<nbr).map(BranchID.init)
         let busOrder = (0..<n).map(BusID.init)
 
+        var residual: Double?
         if let tol = residualTolerance {
             let r = Self.nodalBalanceResidual(net, factors: factors)
             guard r <= tol else {
                 throw SensitivityError.singularAdmittanceMatrix(worstResidual: r)
             }
+            residual = r          // carried as provenance for the flat export (R3)
         }
 
         let base = PTDFResult(basis: .dcLossless, slack: .networkDefined,
                               signature: signature, branchOrder: branchOrder,
-                              busOrder: busOrder, storage: .base(factors))
+                              busOrder: busOrder, storage: .base(factors),
+                              solveResidual: residual)
         switch slack {
         case .networkDefined:
             return base
@@ -73,7 +76,7 @@ public struct SensitivityEngine: Sendable {
         }
         return PTDFResult(basis: base.basis, slack: slack, signature: base.signature,
                           branchOrder: base.branchOrder, busOrder: base.busOrder,
-                          storage: .dense(out))
+                          storage: .dense(out), solveResidual: base.solveResidual)
     }
 
     // MARK: - LODF
@@ -136,7 +139,8 @@ public struct SensitivityEngine: Sendable {
         }
         return PTDFResult(basis: ptdf.basis, slack: ptdf.slack,
                           signature: ptdf.signature, branchOrder: ptdf.branchOrder,
-                          busOrder: ptdf.busOrder, storage: .dense(out))
+                          busOrder: ptdf.busOrder, storage: .dense(out),
+                          solveResidual: ptdf.solveResidual)
     }
 
     // MARK: - Control 2's quantity
