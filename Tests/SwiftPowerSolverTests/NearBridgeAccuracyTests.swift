@@ -66,7 +66,7 @@ final class NearBridgeAccuracyTests: XCTestCase {
         let factors = DistributionFactors.build(net)
         let base = DCPowerFlowSolver().solve(net)
         guard base.converged else { return XCTFail("\(name): base DC solve failed") }
-        let bridges = ConnectivityIslandingTests.bridges(net)
+        let bridges = NetworkConnectivity.bridgeBranches(net)
 
         // Non-bridges ranked by how close h comes to 1 — the near-bridges.
         var candidates: [(k: Int, dev: Double)] = []

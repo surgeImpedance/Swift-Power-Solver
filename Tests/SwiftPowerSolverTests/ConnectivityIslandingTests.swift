@@ -21,66 +21,6 @@ final class ConnectivityIslandingTests: XCTestCase {
         FileHandle.standardError.write(Data((m + "\n").utf8))
     }
 
-    /// Bridges of the live, in-service graph — iterative Tarjan, so a 9,241-bus
-    /// chain cannot overflow the stack.
-    ///
-    /// Parallel branches are handled by skipping the specific parent EDGE, not
-    /// every edge back to the parent vertex: one of a parallel pair is never a
-    /// bridge, which is the same rule `dump_reference.py:_islanding_outages`
-    /// applies via networkx. Self-loops are never bridges. Branches that are
-    /// out of service or touch a dead bus are inert — `false`, matching the
-    /// `bSeries == 0` path in `DistributionFactors`.
-    static func bridges(_ net: BusBranchNetwork) -> [Bool] {
-        let n = net.busCount
-        let nbr = net.branches.count
-        let live = net.buses.map { $0.type != .isolated }
-
-        var active = [Bool](repeating: false, count: nbr)
-        var adj = [[(to: Int, edge: Int)]](repeating: [], count: n)
-        for (k, br) in net.branches.enumerated() {
-            guard br.inService, live[br.from], live[br.to], br.from != br.to else { continue }
-            active[k] = true
-            adj[br.from].append((br.to, k))
-            adj[br.to].append((br.from, k))
-        }
-
-        var disc = [Int](repeating: -1, count: n)
-        var low = [Int](repeating: 0, count: n)
-        var isBridge = [Bool](repeating: false, count: nbr)
-        var timer = 0
-
-        for root in 0..<n where live[root] && disc[root] == -1 {
-            // (node, incoming edge id, next adjacency index to examine)
-            var stack: [(node: Int, parentEdge: Int, next: Int)] = []
-            disc[root] = timer; low[root] = timer; timer += 1
-            stack.append((root, -1, 0))
-
-            while !stack.isEmpty {
-                let frame = stack[stack.count - 1]
-                if frame.next < adj[frame.node].count {
-                    stack[stack.count - 1].next += 1
-                    let (to, edge) = adj[frame.node][frame.next]
-                    if edge == frame.parentEdge { continue }   // the edge we came in on
-                    if disc[to] == -1 {
-                        disc[to] = timer; low[to] = timer; timer += 1
-                        stack.append((to, edge, 0))
-                    } else {
-                        low[frame.node] = min(low[frame.node], disc[to])
-                    }
-                } else {
-                    stack.removeLast()
-                    if let parent = stack.last {
-                        low[parent.node] = min(low[parent.node], low[frame.node])
-                        if low[frame.node] > disc[parent.node] {
-                            isBridge[frame.parentEdge] = true
-                        }
-                    }
-                }
-            }
-        }
-        return (0..<nbr).map { isBridge[$0] && active[$0] }
-    }
-
     private static func sha(_ values: [Double]) -> String {
         values.withUnsafeBytes { raw in
             SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined().prefix(16).description
@@ -91,7 +31,23 @@ final class ConnectivityIslandingTests: XCTestCase {
         let factors = DistributionFactors.build(net)
         let nbr = net.branches.count
         let hBased = (0..<nbr).map { factors.isIslanding(outage: $0) }
-        let structural = Self.bridges(net)
+        // GATE 6.16 — the SHIPPED connectivity, not a probe (M1/D3).
+        //
+        // D2 established coextensivity using a probe Tarjan in this file. That
+        // validated the classification CONCEPT, not the artifact that ships, so
+        // unit 1b ran a THREE-WAY comparison — shipped vs probe vs h-based — on
+        // all six cases while the probe still existed, then deleted it. Result:
+        // every hash identical, shipped-vs-h = 0 AND shipped-vs-probe = 0 on
+        // all six (case14/39/118/300/1354/9241, 16,049 branches at case9241).
+        // D2's finding therefore now covers the shipped code, and the probe is
+        // gone — D3 has ONE connectivity implementation in the package.
+        // D2 established coextensivity using the PROBE. The shipped
+        // implementation is a DIFFERENT implementation by design, so D2's
+        // result does not transfer to it by assumption. If the two disagree,
+        // the probe is the only thing that says WHERE — deleting it first
+        // would throw away the diagnostic at the moment it is needed.
+        let structural = NetworkConnectivity.bridgeBranches(net)   // SHIPPED
+
 
         let hHash = Self.sha(hBased.map { $0 ? 1.0 : 0.0 })
         let cHash = Self.sha(structural.map { $0 ? 1.0 : 0.0 })
@@ -99,7 +55,7 @@ final class ConnectivityIslandingTests: XCTestCase {
 
         note("D2 \(name): branches=\(nbr) h-based=\(hBased.filter { $0 }.count) "
              + "connectivity=\(structural.filter { $0 }.count) "
-             + "hHash=\(hHash) cHash=\(cHash) differing=\(differing.count)")
+             + "hHash=\(hHash) shippedHash=\(cHash) differing=\(differing.count)")
 
         for k in differing.prefix(20) {
             let br = net.branches[k]
@@ -139,6 +95,55 @@ final class ConnectivityIslandingTests: XCTestCase {
                     + "non-bridge |1-h| = %.3e (branch %d), epsilon = 1e-9, "
                     + "x spread = %.3e",
                     name, worstBridgeDev, closestNonBridgeDev, closestNonBridge, spread))
+    }
+
+    /// STRUCTURAL COVERAGE (J1 mode 1, applied per structural case rather than
+    /// per gate). `NetworkConnectivity` is new code whose first real exercise is
+    /// unit 1b. Six cases and 16,049 branches is strong evidence about the
+    /// topologies that happen to be in the corpus and SILENT about the rest, so
+    /// this reports which structural cases any fixture actually witnesses.
+    ///
+    /// An unwitnessed case is NOT a defect — it is a scope statement, recorded
+    /// so that "6.16 green" is not later read as more than it is.
+    func testStructuralCoverageOfTheFixtureCorpus() throws {
+        func report(_ name: String, _ net: BusBranchNetwork) {
+            let live = net.buses.map { $0.type != .isolated }
+            let isolated = net.buses.filter { $0.type == .isolated }.count
+            let oos = net.branches.filter { !$0.inService }.count
+            let selfLoops = net.branches.filter { $0.from == $0.to }.count
+            var pairs: [String: Int] = [:]
+            for b in net.branches where b.inService && b.from != b.to {
+                pairs["\(min(b.from, b.to))-\(max(b.from, b.to))", default: 0] += 1
+            }
+            let parallel = pairs.values.filter { $0 > 1 }.count
+            var visited = Set<Int>(); var islands = 0; var slackless = 0
+            for v in 0..<net.busCount where live[v] && !visited.contains(v) {
+                let comp = NetworkConnectivity.componentReachable(from: v, in: net, live: live)
+                visited.formUnion(comp); islands += 1
+                if !comp.contains(where: { net.buses[$0].type == .slack }) { slackless += 1 }
+            }
+            note("1b COVERAGE \(name): isolated=\(isolated) oos=\(oos) "
+                 + "selfLoops=\(selfLoops) parallelPairs=\(parallel) "
+                 + "islands=\(islands) slacklessIslands=\(slackless)")
+        }
+        for n in ["case14", "case39", "case118"] {
+            report(n, try ReferenceCase.load(n).network())
+        }
+        if let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] {
+            let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+            for p in paths.split(separator: ",").map(String.init) {
+                let f = try d.decode(FactorsIdentityTests.NetworkFixture.self,
+                                     from: Data(contentsOf: URL(fileURLWithPath: p)))
+                report(f.name, f.network())
+            }
+        }
+        report("twoIslandOneSlack", BusBranchNetwork(
+            baseMVA: 100,
+            buses: [.init(type: .slack, baseKv: 138), .init(type: .pq, baseKv: 138),
+                    .init(type: .pq, baseKv: 138), .init(type: .pq, baseKv: 138)],
+            branches: [.init(from: 0, to: 1, r: 0.01, x: 0.10),
+                       .init(from: 2, to: 3, r: 0.01, x: 0.10)],
+            generators: [.init(bus: 0, pPu: 1.0, vSetPu: 1.0)]))
     }
 
     func testReferenceCasesAgree() throws {
