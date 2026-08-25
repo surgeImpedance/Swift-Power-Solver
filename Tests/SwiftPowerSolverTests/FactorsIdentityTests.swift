@@ -43,7 +43,12 @@ final class FactorsIdentityTests: XCTestCase {
         "case9241": (ptdf: "62bb035e5223ad58", lodf: "eaed1f025bd042b4", islanding: "61526d6902be8eea"),
     ]
 
-    private struct NetworkFixture: Decodable {
+    // Visibility widened (private -> internal) at unit 0 so the four probe
+    // decoders could be deleted and repointed here. NOTHING ELSE about this
+    // type changed: it is ON the golden path (fixture -> decode -> build ->
+    // hash), and P1 chose it as the survivor precisely so that path stays
+    // LITERALLY unchanged rather than merely equivalent.
+    struct NetworkFixture: Decodable {
         struct B: Decodable { var i: Int; var type: Int; var pdMw, qdMvar, gsMw, bsMvar, baseKv: Double }
         struct R: Decodable { var f, t: Int; var r, x, b, g, tap, shiftDeg: Double; var status: Int }
         struct G: Decodable { var bus: Int; var pgMw, qmaxMvar, qminMvar, vgPu, vaDeg: Double; var status: Int }

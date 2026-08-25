@@ -254,7 +254,7 @@ final class SingularFactorsTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         for path in paths.split(separator: ",").map(String.init) {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
-            let fixture = try decoder.decode(ScaleFixture.self, from: data)
+            let fixture = try decoder.decode(FactorsIdentityTests.NetworkFixture.self, from: data)
             let net = fixture.network()
             let t0 = ContinuousClock.now
             let residual = Self.worstColumnResidual(net)
@@ -268,44 +268,6 @@ final class SingularFactorsTests: XCTestCase {
                         ms))
         }
     }
-
-    /// Mirror of FactorsIdentityTests.NetworkFixture — same JSON, decoded here
-    /// so the two tests do not have to share a private type.
-    private struct ScaleFixture: Decodable {
-        struct B: Decodable { var i: Int; var type: Int; var pdMw, qdMvar, gsMw, bsMvar, baseKv: Double }
-        struct R: Decodable { var f, t: Int; var r, x, b, g, tap, shiftDeg: Double; var status: Int }
-        struct G: Decodable { var bus: Int; var pgMw, qmaxMvar, qminMvar, vgPu, vaDeg: Double; var status: Int }
-        var name: String
-        var baseMva: Double
-        var buses: [B]
-        var branches: [R]
-        var gens: [G]
-
-        func network() -> BusBranchNetwork {
-            BusBranchNetwork(
-                baseMVA: baseMva,
-                buses: buses.map {
-                    BusBranchNetwork.Bus(type: BusBranchNetwork.BusType(rawValue: $0.type) ?? .pq,
-                                         baseKv: $0.baseKv,
-                                         pLoadPu: $0.pdMw / baseMva, qLoadPu: $0.qdMvar / baseMva,
-                                         gsPu: $0.gsMw / baseMva, bsPu: $0.bsMvar / baseMva)
-                },
-                branches: branches.map {
-                    BusBranchNetwork.Branch(from: $0.f, to: $0.t, r: $0.r, x: $0.x, b: $0.b, g: $0.g,
-                                            tap: $0.tap <= 0 ? 1.0 : $0.tap,
-                                            shiftRad: $0.shiftDeg * .pi / 180,
-                                            inService: $0.status == 1)
-                },
-                generators: gens.map {
-                    BusBranchNetwork.Generator(bus: $0.bus, pPu: $0.pgMw / baseMva, vSetPu: $0.vgPu,
-                                               vaRefRad: $0.vaDeg * .pi / 180,
-                                               qMinPu: $0.qminMvar / baseMva,
-                                               qMaxPu: $0.qmaxMvar / baseMva,
-                                               inService: $0.status == 1)
-                })
-        }
-    }
-
     /// Locate the misclassification ONSET precisely, and separate the two
     /// quantities that C2's decade sweep conflated:
     ///
