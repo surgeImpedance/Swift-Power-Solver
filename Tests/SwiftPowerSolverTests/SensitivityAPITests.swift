@@ -211,6 +211,21 @@ final class SensitivityAPITests: XCTestCase {
         note(String(format: "unit2   -> engine path costs ~%.0f ms over the bare build: "
                     + "control 2's residual PLUS connectivity PLUS conditioning, "
                     + "not separated by this measurement", ms - msBuild))
+        // ISOLATE the residual, so the sampling question is decided on a
+        // number rather than on a delta that bundles three things.
+        let f = DistributionFactors.build(net)
+        let t3 = ContinuousClock.now
+        _ = SensitivityEngine.nodalBalanceResidual(net, factors: f)
+        let dtR = ContinuousClock.now - t3
+        let msR = Double(dtR.components.seconds) * 1000
+                + Double(dtR.components.attoseconds) / 1e15
+        let t4 = ContinuousClock.now
+        _ = NetworkConnectivity.bridgeBranches(net)
+        let dtC = ContinuousClock.now - t4
+        let msC = Double(dtC.components.seconds) * 1000
+                + Double(dtC.components.attoseconds) / 1e15
+        note(String(format: "unit3a ISOLATED at case9241: residual %.0f ms | "
+                    + "connectivity %.0f ms | bare build %.0f ms", msR, msC, msBuild))
         XCTAssertFalse(lodf.branchOrder.isEmpty)
     }
 

@@ -106,6 +106,58 @@ final class NearBridgeAccuracyTests: XCTestCase {
         }
     }
 
+    // MARK: - Gate 6.5 — LODF vs brute force, FULL sweep
+    //
+    // N1 ruled that E2's near-bridge probe merges into 6.5 rather than being
+    // maintained separately: it is 6.5's machinery with a filter on it. So this
+    // sweeps EVERY non-islanding branch and reports the near-bridge subset as a
+    // breakdown of the same measurement.
+    //
+    // Independent of the pandapower oracle in N1ScreeningTests, and
+    // deliberately so: this compares the LODF superposition against a real DC
+    // re-solve by the package's own solver, which does not consult the factors.
+    // Two independent paths to the same answer.
+    func test6_5_lodfVsBruteForceFullSweep() throws {
+        for name in ["case14", "case39", "case118"] {
+            let net = try ReferenceCase.load(name).network()
+            let factors = DistributionFactors.build(net)
+            let base = DCPowerFlowSolver().solve(net)
+            XCTAssertTrue(base.converged)
+            let bridges = NetworkConnectivity.bridgeBranches(net)
+
+            var worst = 0.0, worstPair = (-1, -1)
+            var swept = 0
+            var worstNearBridge = 0.0, nearBridgeCount = 0
+            let basePu = base.branchFlows.map(\.pFromPu)
+
+            for k in 0..<net.branches.count where net.branches[k].inService && !bridges[k] {
+                var outaged = net
+                outaged.branches[k].inService = false
+                let post = DCPowerFlowSolver().solve(outaged)
+                guard post.converged else { continue }
+                swept += 1
+                let br = net.branches[k]
+                let h = factors.ptdf(branch: k, bus: br.from) - factors.ptdf(branch: k, bus: br.to)
+                let isNear = abs(1 - h) < 1e-2
+                if isNear { nearBridgeCount += 1 }
+
+                for m in 0..<net.branches.count where m != k {
+                    let predicted = basePu[m] + factors.lodf(monitored: m, outaged: k) * basePu[k]
+                    let d = abs(predicted - post.branchFlows[m].pFromPu)
+                    if d > worst { worst = d; worstPair = (m, k) }
+                    if isNear { worstNearBridge = max(worstNearBridge, d) }
+                }
+            }
+            XCTAssertGreaterThan(swept, 0, "\(name): no outage swept — empty payload")
+            note(String(format: "6.5 %@: %d outages swept, max |Δ| = %.4e pu at "
+                        + "(monitored %d, outaged %d); near-bridge subset %d "
+                        + "outages, max |Δ| = %.4e pu",
+                        name, swept, worst, worstPair.0, worstPair.1,
+                        nearBridgeCount, worstNearBridge))
+            XCTAssertLessThanOrEqual(worst, 1e-8, "\(name): 6.5 gate is 1e-8 pu")
+        }
+    }
+
     func testReferenceCase() throws {
         measure("case118", try ReferenceCase.load("case118").network())
     }
