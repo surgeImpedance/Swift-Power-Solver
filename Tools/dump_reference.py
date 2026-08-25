@@ -699,8 +699,212 @@ def dump_case(name: str, make_net) -> dict:
     return doc
 
 
+# ---------------------------------------------------------------------------
+# Unit 3b — the two fixture-building gates' oracles (6.7, and 6.2/6.15).
+#
+# BOTH LAND IN NEW FILES. The existing case14/39/118.json are NOT regenerated
+# by these: every N-1 golden and bit-identity digest in this repo is keyed to
+# their exact bytes (DECISIONS.md D68 §3 — the golden path runs through
+# pandapower as well as Accelerate), so re-emitting them to add a key would put
+# an unrelated oracle version on the critical path of four gates. Additive
+# files cost one extra `Bundle.module.url` and risk nothing.
+# ---------------------------------------------------------------------------
+
+
+def dump_ptdf_reference() -> dict:
+    """Gate 6.7 — an EXTERNAL PTDF reference, from pandapower's own makePTDF.
+
+    Why this is not redundant with 6.5's brute-force re-solve: 6.5 validates
+    LODF against a re-solve computed by the SAME DC machinery, so it cannot
+    see an error shared by both. makePTDF is an independent implementation of
+    the matrix itself.
+
+    The mandatory corpus only (D64 §12). case118 is 186x118 = 21,948 doubles,
+    which is the largest that keeps a bare clone cheap.
+    """
+    out = {}
+    for name, make_net in CASES.items():
+        net = make_net()
+        pp.rundcpp(net)
+        _check_ppc_is_identity_mapped(net)
+        ppc = net._ppc
+        H = makePTDF(ppc["baseMVA"], ppc["bus"], ppc["branch"])
+        H = np.asarray(H, dtype=float)
+        if not np.all(np.isfinite(H)):
+            raise AssertionError(f"{name}: makePTDF produced non-finite entries")
+        # The reference slack makePTDF used, so the Swift side can ask for the
+        # SAME scheme rather than comparing two different conventions and
+        # calling the difference an error.
+        slacks = [int(b[BUS_I].real) for b in ppc["bus"] if int(b[BUS_TYPE].real) == 3]
+        out[name] = {
+            "n_bus": int(H.shape[1]),
+            "n_branch": int(H.shape[0]),
+            "slack_buses": slacks,
+            # Reported so the Swift gate can assert a MINIMUM nonzero count and
+            # refuse to agree trivially with an all-zero matrix.
+            "nonzero_count": int(np.count_nonzero(H)),
+            # The count that MEANS something. makePTDF carries hundreds of
+            # entries of numerical dust — down to |H| ~ 1e-22 on case118 —
+            # where an exact-zero implementation returns 0.0. Comparing raw
+            # nonzero counts therefore compares litter, not sensitivities.
+            # This counts entries at or above the gate's own tolerance.
+            "significant_count": int((np.abs(H) > 1e-9).sum()),
+            "max_abs": float(np.abs(H).max()),
+            "ptdf": [[float(v) for v in row] for row in H],
+        }
+        print(f"  ptdf/{name}: {H.shape[0]}x{H.shape[1]}, "
+              f"{int(np.count_nonzero(H))} nonzero "
+              f"({int((np.abs(H) > 1e-9).sum())} significant), "
+              f"max|H| {float(np.abs(H).max()):.6f}, slack {slacks}")
+    return out
+
+
+def _build_shifter_loop():
+    """A9 item 1 — the hand-checkable shifter oracle.
+
+    Two buses joined by TWO parallel branches, one of them a transformer with
+    a phase shift, and NO load and NO generation anywhere. Net injection is
+    zero at every bus, so any flow that exists is a pure circulating flow
+    driven by the shift alone — which makes the shift term the ONLY thing the
+    fixture measures, rather than a small correction on top of load flow.
+
+    Hand-check: for a DC model the loop carries
+        c = shift_rad / (x_line + x_trafo)   [pu on baseMVA]
+    in one direction and -c in the other. The gate reports the measured value
+    beside this, so "the fixture contains a shifter" is a NUMBER and not a
+    belief about how it was built. (A fixture constructed to contain a
+    near-bridge in this same milestone turned out to contain its inverse, and
+    only an assertion on the measured value caught it.)
+    """
+    net = pp.create_empty_network(sn_mva=100.0)
+    b0 = pp.create_bus(net, vn_kv=110.0, name="A")
+    b1 = pp.create_bus(net, vn_kv=110.0, name="B")
+    pp.create_ext_grid(net, bus=b0, vm_pu=1.0, va_degree=0.0)
+    # Branch 1: a plain line.
+    pp.create_line_from_parameters(net, from_bus=b0, to_bus=b1, length_km=1.0,
+                                   r_ohm_per_km=0.0, x_ohm_per_km=12.1,
+                                   c_nf_per_km=0.0, max_i_ka=10.0)
+    # Branch 2: an ideal-ratio transformer carrying the phase shift. 5 degrees
+    # is deliberately LARGE — three orders above the pegase shifts — so the
+    # circulating flow is unmistakable and the 6.15 mutation cannot be lost in
+    # rounding.
+    pp.create_transformer_from_parameters(
+        net, hv_bus=b0, lv_bus=b1, sn_mva=100.0, vn_hv_kv=110.0, vn_lv_kv=110.0,
+        vkr_percent=0.0, vk_percent=10.0, pfe_kw=0.0, i0_percent=0.0,
+        shift_degree=5.0)
+    return net
+
+
+def dump_shifter_reference() -> list:
+    """Gates 6.2 and 6.15 — the shifter-bearing fixtures.
+
+    NO IEEE CASE IN THIS REPO HAS A PHASE SHIFTER: nshift = 0 on all six, so a
+    base-flow-reconstruction gate written against them validates the shift term
+    against an empty payload and passes vacuously (D64 §12, A9). Two networks,
+    for two different reasons:
+
+      shifter_loop   — one shifter, zero injection, hand-checkable, and the
+                       shift term is 100% of the answer.
+      case1354pegase — 6 shifters at realistic scale, where the shift term is a
+                       correction on top of real load flow. NOT case9241
+                       (66 shifters) — too slow for a routine gate (D64 §12).
+
+    Each network reports the MEASURED size of its shift term — the DC flows
+    re-solved with every shift zeroed, differenced against the real solve — so
+    the payload is a number in the reference itself.
+    """
+    import copy
+    out = []
+    for name, make_net in (("shifter_loop", _build_shifter_loop),
+                           ("case1354pegase", pn.case1354pegase)):
+        net = make_net()
+        pp.rundcpp(net)
+        _check_ppc_is_identity_mapped(net)
+        ppc = net._ppc
+        shift = np.asarray([float(r[SHIFT].real) for r in ppc["branch"]])
+        nshift = int((shift != 0).sum())
+        if nshift == 0:
+            raise AssertionError(f"{name}: nshift = 0 — this fixture exists to "
+                                 "carry a phase shifter and does not")
+
+        doc = {"name": name, "n_shift": nshift}
+        doc.update(dump_params(net))
+        doc["dc"] = dump_dc(net)
+
+        # THE PAYLOAD MEASUREMENT. Re-solve with every shift set to zero; the
+        # difference IS the shift term's contribution to base flows. A gate
+        # whose fixture cannot move when the term is deleted is testing
+        # nothing, and this is the number that proves it can.
+        # Zeroed at the MODEL level and re-solved as a real network, not by
+        # editing ppc in place: a ppc edit measures what the ppc would do, and
+        # what the gate cares about is what the network does.
+        net0 = make_net()
+        if len(net0.trafo):
+            net0.trafo["shift_degree"] = 0.0
+        if hasattr(net0, "trafo3w") and len(net0.trafo3w):
+            for c in ("shift_mv_degree", "shift_lv_degree"):
+                if c in net0.trafo3w:
+                    net0.trafo3w[c] = 0.0
+        pp.rundcpp(net0)
+        shift0 = np.asarray([float(r[SHIFT].real) for r in net0._ppc["branch"]])
+        if int((shift0 != 0).sum()) != 0:
+            raise AssertionError(f"{name}: zeroing shift_degree left "
+                                 f"{int((shift0 != 0).sum())} shifted branches — "
+                                 "the control did not do what it claims")
+        pf = np.asarray([float(r[PF].real) for r in ppc["branch"]])
+        pf0 = np.asarray([float(r[PF].real) for r in net0._ppc["branch"]])
+        delta = float(np.abs(pf - pf0).max())
+        doc["shift_term_max_flow_delta_mw"] = delta
+        doc["shift_deg_max_abs"] = float(np.abs(shift).max())
+        out.append(doc)
+        print(f"  shifter/{name}: {len(doc['buses'])} buses, "
+              f"{len(doc['branches'])} branches, n_shift={nshift}, "
+              f"max|shift| {float(np.abs(shift).max()):.6f} deg, "
+              f"shift term moves base flows by up to {delta:.3f} MW")
+    return out
+
+
 def main() -> None:
+    """Sections are selectable so a run that only needs the unit-3b oracles
+    cannot rewrite the checked-in case references as a side effect.
+
+        python Tools/dump_reference.py                # everything (default)
+        python Tools/dump_reference.py ptdf shifter   # unit 3b only
+
+    Why the selector exists (D68 §3): case14/39/118.json are the input half of
+    the N-1 golden and the bit-identity digests. Re-emitting them is a
+    deliberate act with a justification owed in the commit message, never a
+    side effect of adding an unrelated oracle.
+    """
+    known = {"cases", "shortcircuit", "timeseries", "distributed_slack",
+             "plimits", "ptdf", "shifter"}
+    want = set(sys.argv[1:]) or known
+    unknown = want - known
+    if unknown:
+        raise SystemExit(f"unknown section(s): {sorted(unknown)}; "
+                         f"known: {sorted(known)}")
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if "ptdf" in want:
+        print("gate 6.7 — external PTDF reference (makePTDF):")
+        doc = {"pandapower_version": pp.__version__, "cases": dump_ptdf_reference()}
+        out = OUT_DIR / "ptdf.json"
+        out.write_text(json.dumps(doc, indent=1))
+        print(f"ptdf: {len(doc['cases'])} cases -> {out.relative_to(HERE.parent)}")
+
+    if "shifter" in want:
+        print("gates 6.2 / 6.15 — shifter-bearing fixtures:")
+        doc = {"pandapower_version": pp.__version__,
+               "networks": dump_shifter_reference()}
+        out = OUT_DIR / "shifter.json"
+        out.write_text(json.dumps(doc, indent=1))
+        print(f"shifter: {len(doc['networks'])} networks -> "
+              f"{out.relative_to(HERE.parent)}")
+
+    if "cases" not in want:
+        return
+
     for name, make_net in CASES.items():
         doc = dump_case(name, make_net)
         out = OUT_DIR / f"{name}.json"
@@ -715,6 +919,9 @@ def main() -> None:
               f"{len(cg['outages'])} outages ({len(cg['islanding_branches'])} islanding) "
               f"-> {out.relative_to(HERE.parent)}")
 
+    if "shortcircuit" not in want:
+        return
+
     # Piece 4: short-circuit reference networks (separate file — the IEEE case
     # JSONs carry no short-circuit data).
     sc = {"pandapower_version": pp.__version__, "networks": dump_shortcircuit()}
@@ -724,12 +931,18 @@ def main() -> None:
           f"({', '.join(n['name'] for n in sc['networks'])}) "
           f"-> {sc_out.relative_to(HERE.parent)}")
 
+    if "timeseries" not in want:
+        return
+
     # Time-series sweep reference (separate file; additive).
     ts = {"pandapower_version": pp.__version__, **dump_timeseries()}
     ts_out = OUT_DIR / "timeseries.json"
     ts_out.write_text(json.dumps(ts, indent=1))
     print(f"timeseries: base {ts['base_case']}, {len(ts['steps'])} steps "
           f"-> {ts_out.relative_to(HERE.parent)}")
+
+    if "distributed_slack" not in want:
+        return
 
     # Distributed-slack reference networks (separate file; additive).
     ds = {"pandapower_version": pp.__version__, "networks": dump_distributed_slack()}
@@ -738,6 +951,9 @@ def main() -> None:
     print(f"distributed_slack: {len(ds['networks'])} networks "
           f"({', '.join(n['name'] for n in ds['networks'])}) "
           f"-> {ds_out.relative_to(HERE.parent)}")
+
+    if "plimits" not in want:
+        return
 
     # Distributed slack WITH generator P limits (separate file; additive).
     # Driven as a cascade of pandapower solves — see the note above
