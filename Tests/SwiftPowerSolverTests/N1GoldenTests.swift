@@ -19,6 +19,13 @@ import XCTest
 ///
 /// A recapture that changes a digest must be justified in the commit message
 /// against D64 §1 — the arithmetic is not supposed to move.
+/// ⚠️ ACCELERATE EXPOSURE — this gate is one of the two that carry it.
+/// DECISIONS.md D68: the digests below are compared against committed
+/// constants, so one arm of the comparison is frozen and an Accelerate change
+/// (`SparseFactor`/`SparseSolve`, reached through the DC solve) moves the other
+/// and fires the gate. If it fires on a clean tree, check `sw_vers` and
+/// `pandapower.__version__` against D68 §4 BEFORE hunting a code defect. D68 §2
+/// added this gate to the exposed set: `P0-E` did not name it.
 final class N1GoldenTests: XCTestCase {
 
     private static let cases = ["case14", "case39", "case118"]

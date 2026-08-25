@@ -15,10 +15,19 @@ import XCTest
 ///     python Tools/dump_factors_fixture.py --out-dir /tmp case300 case1354pegase case9241pegase
 ///
 /// Verified 2026-08-24: regenerated fixtures reproduce all three goldens
-/// EXACTLY on pandapower 3.2.1, so a hash mismatch means the code moved, not
-/// the fixture. Absent the fixtures this test SKIPS — which is how a gate named
-/// never-regress in CLAUDE.md came to be silently unrunnable in a fresh
-/// checkout.
+/// EXACTLY on pandapower 3.2.1. That version is now ASSERTED below rather than
+/// asserted in this comment (D68 §3): the fixture carries `pandapower_version`
+/// and the sentence above was a quantitative claim with no control behind it,
+/// so a fixture from another pandapower would have moved a hash and read as
+/// "the code moved". Absent the fixtures this test USED TO SKIP — which is how
+/// a gate named never-regress in CLAUDE.md came to be silently unrunnable in a
+/// fresh checkout. It now FAILS; see `testBuildIdentity`.
+///
+/// ⚠️ ACCELERATE EXPOSURE — this gate is one of the two that carry it.
+/// DECISIONS.md D68: the goldens below are a claim about a closed third-party
+/// implementation (`SparseFactor`/`SparseSolve`). If they move on a clean tree,
+/// check `sw_vers` and `pandapower.__version__` against D68 §4 BEFORE hunting a
+/// code defect — no diff can show that cause.
 ///
 /// Each fixture is the network-only portion of tools/dump_reference.py output
 /// (buses/branches/gens/base — the factors build never reads a solution).
@@ -43,6 +52,13 @@ final class FactorsIdentityTests: XCTestCase {
         "case9241": (ptdf: "62bb035e5223ad58", lodf: "eaed1f025bd042b4", islanding: "61526d6902be8eea"),
     ]
 
+    /// The oracle version the goldens above were captured against, and the only
+    /// one they are claims about (D68 §3). The golden path runs through TWO
+    /// closed implementations — pandapower on the way in, Accelerate on the way
+    /// through — and a change in either moves a hash with a clean tree. This
+    /// pins the half that can be pinned.
+    static let goldenPandapowerVersion = "3.2.1"
+
     // Visibility widened (private -> internal) at unit 0 so the four probe
     // decoders could be deleted and repointed here. NOTHING ELSE about this
     // type changed: it is ON the golden path (fixture -> decode -> build ->
@@ -54,6 +70,9 @@ final class FactorsIdentityTests: XCTestCase {
         struct G: Decodable { var bus: Int; var pgMw, qmaxMvar, qminMvar, vgPu, vaDeg: Double; var status: Int }
         var name: String
         var baseMva: Double
+        /// Provenance, added at D68 §3. Optional so fixtures written before the
+        /// dumper emitted it still decode; `testBuildIdentity` requires it.
+        var pandapowerVersion: String?
         var buses: [B]
         var branches: [R]
         var gens: [G]
@@ -108,6 +127,26 @@ final class FactorsIdentityTests: XCTestCase {
         for path in paths.split(separator: ",").map(String.init) {
             let fixture = try decoder.decode(NetworkFixture.self,
                                              from: Data(contentsOf: URL(fileURLWithPath: path)))
+
+            // D68 §3. An unprovenanced or differently-provenanced fixture must
+            // FAIL NAMING THE VERSION, not sail through and move a hash: the
+            // two failures are indistinguishable in every summary view, and
+            // only one of them is a code defect.
+            guard let ppVersion = fixture.pandapowerVersion else {
+                XCTFail("""
+                    \(fixture.name): fixture carries no `pandapower_version`.
+                    The goldens are a claim about pandapower \
+                    \(Self.goldenPandapowerVersion) (D68 §3); a fixture that \
+                    cannot state its own provenance must not read as a pass. \
+                    Regenerate with Tools/dump_factors_fixture.py.
+                    """)
+                continue
+            }
+            XCTAssertEqual(ppVersion, Self.goldenPandapowerVersion,
+                           "\(fixture.name): fixture built on pandapower \(ppVersion), "
+                           + "goldens recorded on \(Self.goldenPandapowerVersion). "
+                           + "A moved hash here is the ORACLE moving, not the code (D68 §3).")
+
             let net = fixture.network()
 
             let t0 = ContinuousClock.now
