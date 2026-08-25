@@ -88,9 +88,40 @@ public struct N1ContingencyAnalyzer {
     public func screen(_ net: BusBranchNetwork,
                        base: PowerFlowSolution,
                        options: ContingencyScreeningOptions
-                        = ContingencyScreeningOptions()) -> ContingencyScreening {
+                        = ContingencyScreeningOptions()) throws -> ContingencyScreening {
         let nbr = net.branches.count
-        let factors = DistributionFactors.build(net)
+
+        // UNIT 2 — the interface change the brief's §5 actually asks for.
+        //
+        // §5 was written on the premise that a duplicate implementation existed
+        // to delete. Step 0 established there never was one: `DistributionFactors`
+        // was already the single public implementation. What §5 wanted is this —
+        // N-1 consuming the PUBLIC types instead of reaching into the factors
+        // with raw `Int` indices.
+        //
+        // Two couplings become load-bearing at this line and were informational
+        // before it:
+        //
+        //  1. ISLANDING CHANGES SOURCE. `DistributionFactors` classifies via
+        //     `h`; `LODFResult` classifies via CONNECTIVITY. Gate 6.16 proved
+        //     these coextensive on six cases and 16,049 branches — but that was
+        //     evidence about two implementations agreeing, not about N-1's
+        //     output. Routing N-1 through `LODFResult` makes it load-bearing,
+        //     and it is the first place to look if the goldens ever move.
+        //
+        //  2. THE RESIDUAL CONTROL CAN NOW REFUSE. `engine.ptdf` applies
+        //     control 2, so this call can `throw` where the old path always
+        //     returned. Healthy fixtures measure 2.2e-15 to 8.8e-15 against a
+        //     1e-6 tolerance, so a refusal here is a finding, not a tuning
+        //     problem — the tolerance is not to be loosened to make a screen
+        //     pass, which would invert the control into a formality.
+        //
+        // The ARITHMETIC is untouched: the superposition below is the same
+        // expression in the same evaluation order, reading the same stored LODF
+        // values through the public subscript. A1 froze that and E4 is watching.
+        let engine = SensitivityEngine()
+        let ptdf = try engine.ptdf(net)
+        let redistribution = try engine.lodf(net, from: ptdf)
 
         func isScreenable(_ k: Int) -> Bool {
             let branch = net.branches[k]
@@ -113,8 +144,10 @@ public struct N1ContingencyAnalyzer {
                 continue
             }
             // Undefined LODF: the outage splits the network. Reported as an
-            // outcome rather than inf/nan — see DistributionFactors.isIslanding.
-            guard !factors.isIslanding(outage: k) else {
+            // outcome rather than inf/nan. Classification is now STRUCTURAL —
+            // `LODFResult.isOutageIslanding` is a graph-bridge test, not a
+            // threshold on `1 − h_k` (D65 §4).
+            guard !redistribution.isOutageIslanding(BranchID(k)) else {
                 cases.append(.init(outagedBranch: k, outcome: .islandsNetwork,
                                    postFlowsPu: [], violations: []))
                 continue
@@ -125,8 +158,8 @@ public struct N1ContingencyAnalyzer {
             var violations: [ContingencyScreening.Violation] = []
             for (idx, m) in monitored.enumerated() {
                 // The outaged branch itself carries nothing afterwards.
-                let post = (m == k) ? 0 : prePu[m] + factors.lodf(monitored: m,
-                                                                 outaged: k) * pk
+                let post = (m == k) ? 0 : prePu[m]
+                    + (try redistribution[BranchID(m), BranchID(k)]) * pk
                 flows[idx] = post
                 guard let rating = net.branches[m].ratingMva, rating > 0 else {
                     continue   // unrated: flow reported, never a violation

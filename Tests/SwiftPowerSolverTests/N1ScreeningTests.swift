@@ -20,7 +20,7 @@ final class N1ScreeningTests: XCTestCase {
 
         var options = ContingencyScreeningOptions()
         options.outageBranches = cg.outages.map(\.branch)
-        let screening = N1ContingencyAnalyzer().screen(net, base: base, options: options)
+        let screening = try N1ContingencyAnalyzer().screen(net, base: base, options: options)
 
         let byOutage = Dictionary(uniqueKeysWithValues:
             screening.cases.map { ($0.outagedBranch, $0) })
@@ -109,12 +109,12 @@ final class N1ScreeningTests: XCTestCase {
                                 generators: gens)
     }
 
-    func testPhaseShifterAndTapAgainstReSolve() {
+    func testPhaseShifterAndTapAgainstReSolve() throws {
         let net = shifterNetwork()
         let base = DCPowerFlowSolver().solve(net)
         XCTAssertTrue(base.converged)
 
-        let screening = N1ContingencyAnalyzer().screen(net, base: base)
+        let screening = try N1ContingencyAnalyzer().screen(net, base: base)
         var worstAll = 0.0
         var worstOutage = -1
 
@@ -145,7 +145,7 @@ final class N1ScreeningTests: XCTestCase {
 
     // MARK: - Screening semantics
 
-    func testRatingsAndEdgeCases() {
+    func testRatingsAndEdgeCases() throws {
         var net = shifterNetwork()
         net.branches[0].ratingMva = 15          // deliberately tight -> violation
         net.branches[1].ratingMva = 10_000      // never violated
@@ -153,7 +153,7 @@ final class N1ScreeningTests: XCTestCase {
         net.branches[3].inService = false       // out-of-service outage
 
         let base = DCPowerFlowSolver().solve(net)
-        let screening = N1ContingencyAnalyzer().screen(
+        let screening = try N1ContingencyAnalyzer().screen(
             net, base: base,
             options: ContingencyScreeningOptions(outageBranches: [0, 1, 2, 3, 4]))
         let byOutage = Dictionary(uniqueKeysWithValues:
@@ -183,7 +183,7 @@ final class N1ScreeningTests: XCTestCase {
     }
 
     /// A radial branch must be reported as islanding, not silently solved.
-    func testRadialBranchReportsIslanding() {
+    func testRadialBranchReportsIslanding() throws {
         // 0 (slack) - 1 - 2, with 2 hanging off a single branch.
         let buses = [
             BusBranchNetwork.Bus(type: .slack, baseKv: 110),
@@ -199,7 +199,7 @@ final class N1ScreeningTests: XCTestCase {
             generators: [BusBranchNetwork.Generator(bus: 0, pPu: 0, vSetPu: 1.0)])
 
         let base = DCPowerFlowSolver().solve(net)
-        let screening = N1ContingencyAnalyzer().screen(net, base: base)
+        let screening = try N1ContingencyAnalyzer().screen(net, base: base)
         for result in screening.cases {
             XCTAssertEqual(result.outcome, .islandsNetwork,
                            "every branch of a radial feeder islands the network")

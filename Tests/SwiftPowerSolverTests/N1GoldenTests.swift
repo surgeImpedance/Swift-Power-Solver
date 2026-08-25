@@ -110,7 +110,7 @@ final class N1GoldenTests: XCTestCase {
         let net = try ratedNetwork(name)
         let base = DCPowerFlowSolver().solve(net)
         XCTAssertTrue(base.converged, "\(name): base DC solve failed")
-        let screening = N1ContingencyAnalyzer().screen(net, base: base,
+        let screening = try N1ContingencyAnalyzer().screen(net, base: base,
                                                        options: ContingencyScreeningOptions())
         return summarize(screening)
     }

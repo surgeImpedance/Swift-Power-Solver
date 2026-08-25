@@ -132,6 +132,88 @@ final class SensitivityAPITests: XCTestCase {
         }
     }
 
+    // MARK: - Unit 2 measurement: does wrapping COPY? (not a gate)
+
+    /// `PTDFResult` and `LODFResult` wrap matrices reaching 1.19 GB at
+    /// case9241. Array COW should make wrapping free, and `Sendable` was added
+    /// in 1a precisely so results could hold factors without copying — **but
+    /// that is an argument, not a measurement.** An unintended copy shows as
+    /// roughly a gigabyte of extra peak and passes every correctness gate.
+    ///
+    /// Baselines: build 3,845 ms / 4,126 ms; peak `phys_footprint` 5.796 GiB.
+    /// Those are the two quantities the iPad decision depends on (D67).
+    func testUnit2_enginePathFootprintAtScale() throws {
+        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"],
+              let path = paths.split(separator: ",").map(String.init)
+                  .first(where: { $0.contains("9241") }) else {
+            XCTFail("SPS_FACTORS_CASES must include case9241 for the unit 2 measurement")
+            return
+        }
+        let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+        let net = try d.decode(FactorsIdentityTests.NetworkFixture.self,
+                               from: Data(contentsOf: URL(fileURLWithPath: path))).network()
+
+        let baseline = FootprintTests.physFootprint()
+        let peak = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        peak.pointee = baseline
+        let stop = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+        stop.pointee = false
+        defer { peak.deallocate(); stop.deallocate() }
+        let sampler = Thread {
+            while !stop.pointee {
+                peak.pointee = max(peak.pointee, FootprintTests.physFootprint())
+                usleep(2000)
+            }
+        }
+        sampler.start()
+
+        let t0 = ContinuousClock.now
+        let engine = SensitivityEngine()
+        let ptdf = try engine.ptdf(net)
+        let lodf = try engine.lodf(net, from: ptdf)
+        let dt = ContinuousClock.now - t0
+        let after = FootprintTests.physFootprint()
+        stop.pointee = true
+        Thread.sleep(forTimeInterval: 0.02)
+
+        let ms = Double(dt.components.seconds) * 1000
+               + Double(dt.components.attoseconds) / 1e15
+        func gib(_ b: Int) -> String { String(format: "%.3f GiB", Double(b) / 1_073_741_824) }
+        note(String(format: "unit2 case9241 ENGINE PATH: %.0f ms (baseline build 3845/4126 ms)", ms))
+        note("unit2   peak phys_footprint  : \(gib(peak.pointee - baseline)) "
+             + "(baseline 5.796 GiB)")
+        note("unit2   retained after       : \(gib(after - baseline))")
+        note("unit2   residual carried     : \(String(describing: ptdf.solveResidual))")
+        // ATTRIBUTION. The baseline is `DistributionFactors.build` ALONE; the
+        // engine path additionally computes the nodal-balance residual
+        // (control 2, O(n·(n+nbr)) and always on by default), the connectivity
+        // bridge set, and the conditioning array. Comparing the totals without
+        // splitting them would report a "regression" that is really new work.
+        let t1 = ContinuousClock.now
+        _ = DistributionFactors.build(net)
+        let dtBuild = ContinuousClock.now - t1
+        let msBuild = Double(dtBuild.components.seconds) * 1000
+                    + Double(dtBuild.components.attoseconds) / 1e15
+
+        let t2 = ContinuousClock.now
+        _ = try SensitivityEngine(residualTolerance: nil).ptdf(net)
+        let dtNoResid = ContinuousClock.now - t2
+        let msNoResid = Double(dtNoResid.components.seconds) * 1000
+                      + Double(dtNoResid.components.attoseconds) / 1e15
+
+        // Stated at the resolution the measurement actually supports. `ms`
+        // covers ptdf(with residual) + lodf(); `msNoResid` covers ptdf(without
+        // residual) only. Their difference is therefore residual + connectivity
+        // + conditioning COMBINED, and this measurement does not separate them.
+        note(String(format: "unit2   attribution: DistributionFactors.build alone %.0f ms | "
+                    + "ptdf without residual %.0f ms | full engine path %.0f ms",
+                    msBuild, msNoResid, ms))
+        note(String(format: "unit2   -> engine path costs ~%.0f ms over the bare build: "
+                    + "control 2's residual PLUS connectivity PLUS conditioning, "
+                    + "not separated by this measurement", ms - msBuild))
+        XCTAssertFalse(lodf.branchOrder.isEmpty)
+    }
+
     // MARK: - Gate 6.17 (Q1) — the single-bus post-shift is BITWISE identical
 
     /// `PTDF_networkDefined[:, s] = 0` for a reference bus `s`, so post-shifting
