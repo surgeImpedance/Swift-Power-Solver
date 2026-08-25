@@ -22,7 +22,12 @@ import os
 //   // GENERATOR OUTAGE generator contingencies: an injection shift handled by
 //                      PTDF columns rather than LODF.
 
-public struct DistributionFactors {
+// `Sendable` added at unit 1a so `PTDFResult` / `LODFResult` can hold factors
+// without copying 1.19 GB at case9241 scale. Genuinely Sendable: every stored
+// property is a `let` over `Int` / `[Double]` / `[Bool]`, so no `@unchecked` is
+// needed. A1 froze this type's ARITHMETIC; a protocol conformance is not
+// arithmetic, and the bit-identity gate is the check that proves it.
+public struct DistributionFactors: Sendable {
 
     /// Below this, the LODF denominator (1 − h_k) counts as zero: outaging k
     /// disconnects the network, so no finite redistribution factor exists.

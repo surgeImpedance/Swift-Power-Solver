@@ -79,6 +79,12 @@ public enum SensitivityError: Error, Equatable, Sendable {
     case invalidParticipationFactors(String)
     /// A reference set that names a bus the network cannot reference.
     case invalidReference(String)
+    /// A network parameter that cannot be hashed or solved with — a non-finite
+    /// susceptance, reactance or tap. Distinct from
+    /// `.singularAdmittanceMatrix`: that names a SOLVE that went wrong, this
+    /// names an INPUT that was never valid. Conflating them would muddy the
+    /// residual control D65 §4 demoted to a garbage-solve guard.
+    case invalidNetworkParameter(String)
 }
 
 // MARK: - Signature
@@ -123,7 +129,8 @@ public struct FactorsSignature: Hashable, Sendable, CustomStringConvertible {
         }
         func absorb(_ v: Double) throws {
             guard v.isFinite else {
-                throw SensitivityError.singularAdmittanceMatrix(worstResidual: nil)
+                throw SensitivityError.invalidNetworkParameter(
+                    "a non-finite susceptance cannot be hashed")
             }
             let normalised = v == 0 ? 0.0 : v      // collapses -0.0 to 0.0
             withUnsafeBytes(of: normalised.bitPattern.littleEndian) {
@@ -177,10 +184,14 @@ func classify(_ net: BusBranchNetwork,
     }
 
     switch slack {
-    case .networkDefined, .distributed:
-        // `.distributed` is a post-shift of the network-defined base, so its
-        // BASE classification is the network's own.
+    case .networkDefined:
         break
+    case .distributed(let weights):
+        // `.distributed` is a post-shift of the network-defined base, so its
+        // BASE classification is the network's own — but the weights are
+        // validated HERE, on construction of the classification, because an
+        // invalid participation set must never reach a solve (D64 §2).
+        try validate(weights, live: live, net: net)
     case .references(let buses):
         guard !buses.isEmpty else {
             throw SensitivityError.invalidReference("an empty reference set leaves B singular")
@@ -203,4 +214,59 @@ func classify(_ net: BusBranchNetwork,
         throw SensitivityError.invalidReference("the network has no reference bus")
     }
     return (live, isReference)
+}
+
+/// Participation-factor validation (D64 §2). Rejects, in order: unknown bus,
+/// non-finite, negative, a set summing to zero, a bus that is isolated or whose
+/// generation is out of service, and a set spanning more than one island.
+///
+/// **Island-spanning is rejected in v1 rather than handled.** Multi-reference
+/// exists in part to serve several islands, and a participation set straddling
+/// two of them is physically meaningless — there is no single compensating
+/// injection. Per-island normalization is DEFERRED, not implemented (D64 §7).
+func validate(_ weights: [BusID: Double], live: [Bool],
+              net: BusBranchNetwork) throws {
+    guard !weights.isEmpty else {
+        throw SensitivityError.invalidParticipationFactors("the set is empty")
+    }
+    var total = 0.0
+    for (bus, w) in weights {
+        guard bus.index >= 0 && bus.index < net.busCount else {
+            throw SensitivityError.unknownBus(bus)
+        }
+        guard w.isFinite else {
+            throw SensitivityError.invalidParticipationFactors(
+                "\(bus) carries a non-finite weight")
+        }
+        guard w >= 0 else {
+            throw SensitivityError.invalidParticipationFactors(
+                "\(bus) carries a negative weight (\(w))")
+        }
+        guard live[bus.index] else {
+            throw SensitivityError.invalidParticipationFactors(
+                "\(bus) is isolated and cannot participate")
+        }
+        let hasLiveGen = net.generators.contains { $0.inService && $0.bus == bus.index }
+        guard hasLiveGen else {
+            throw SensitivityError.invalidParticipationFactors(
+                "\(bus) has no in-service generator and cannot participate")
+        }
+        total += w
+    }
+    guard total > 0 else {
+        throw SensitivityError.invalidParticipationFactors("the weights sum to zero")
+    }
+    // Island-spanning check: every participating bus must reach every other
+    // through in-service branches between live buses.
+    let participants = weights.keys.map(\.index).sorted()
+    if participants.count > 1 {
+        let reachable = NetworkConnectivity.componentReachable(
+            from: participants[0], in: net, live: live)
+        for b in participants.dropFirst() where !reachable.contains(b) {
+            throw SensitivityError.invalidParticipationFactors(
+                "the participation set spans more than one island "
+                + "(bus \(participants[0]) and bus \(b) are not connected); "
+                + "per-island normalization is deferred, not implemented")
+        }
+    }
 }
