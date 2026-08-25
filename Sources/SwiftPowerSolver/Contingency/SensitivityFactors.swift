@@ -59,8 +59,29 @@ public enum SlackReference: Sendable, Hashable {
     /// had, and the default. Multi-reference is deliberate: it is how several
     /// islands each get a reference.
     case networkDefined
-    /// An explicit reference set. Single-slack is `.references([b])`.
-    case references([BusID])
+    /// Absorption spread UNIFORMLY over the given buses — which is what a
+    /// post-shift of the network-defined base by uniform weights actually does.
+    ///
+    /// **Named for the operation, not for the intent (Q1).** An earlier spelling
+    /// was `.references`, and that name asserted something the implementation
+    /// does not do: a true reference set is EXCLUDED from the reduced system and
+    /// absorbs per island, whereas a post-shift spreads absorption uniformly
+    /// across the set regardless of island. Those are different operations —
+    /// which is exactly why an island-spanning set has to be rejected here.
+    ///
+    /// Within one island the distinction dissolves: several *references* in a
+    /// single island is over-constrained and ill-defined, so uniform
+    /// distribution is the only sensible reading. Single-slack is
+    /// `.uniformlyDistributed([b])`, kept as the ergonomic spelling rather than
+    /// folded into `.distributed`.
+    ///
+    /// **Exactness:** `PTDF_networkDefined[:, s] = 0` for a reference bus `s`,
+    /// so post-shifting by `s` subtracts a zero column and the single-bus case
+    /// is BITWISE identical to `.networkDefined` on a single-slack network —
+    /// gate 6.17. That identity (changing slack from `s` to `b` is subtraction
+    /// of column `b`) is the whole justification for not opening the frozen
+    /// build to support an explicit reference set.
+    case uniformlyDistributed([BusID])
     /// Participation factors, normalised on construction. Computed as a
     /// post-shift of the `.networkDefined` base — the shift is base-invariant
     /// when the weights sum to 1, so there is no second factorization.
@@ -72,7 +93,7 @@ public enum SlackReference: Sendable, Hashable {
 public enum SensitivityError: Error, Equatable, Sendable {
     case unknownBus(BusID)
     case unknownBranch(BranchID)
-    case topologyMismatch(expected: FactorsSignature, actual: FactorsSignature)
+    case signatureMismatch(expected: FactorsSignature, actual: FactorsSignature)
     case islandingOutage(BranchID)
     case singularAdmittanceMatrix(worstResidual: Double?)
     case disconnectedNetwork
@@ -192,9 +213,9 @@ func classify(_ net: BusBranchNetwork,
         // validated HERE, on construction of the classification, because an
         // invalid participation set must never reach a solve (D64 §2).
         try validate(weights, live: live, net: net)
-    case .references(let buses):
+    case .uniformlyDistributed(let buses):
         guard !buses.isEmpty else {
-            throw SensitivityError.invalidReference("an empty reference set leaves B singular")
+            throw SensitivityError.invalidReference("an empty absorption set leaves B singular")
         }
         var replacement = [Bool](repeating: false, count: n)
         for b in buses {

@@ -48,7 +48,7 @@ public struct SensitivityEngine: Sendable {
         switch slack {
         case .networkDefined:
             return base
-        case .references(let buses):
+        case .uniformlyDistributed(let buses):
             let w = 1.0 / Double(buses.count)
             return Self.shift(base, weights: Dictionary(
                 uniqueKeysWithValues: buses.map { ($0, w) }), slack: slack)
@@ -82,7 +82,7 @@ public struct SensitivityEngine: Sendable {
                      from ptdf: PTDFResult? = nil) throws -> LODFResult {
         let signature = try FactorsSignature.of(net)
         if let ptdf, ptdf.signature != signature {
-            throw SensitivityError.topologyMismatch(expected: ptdf.signature,
+            throw SensitivityError.signatureMismatch(expected: ptdf.signature,
                                                     actual: signature)
         }
         let factors: DistributionFactors
@@ -116,7 +116,7 @@ public struct SensitivityEngine: Sendable {
     public func otdf(from ptdf: PTDFResult, lodf: LODFResult,
                      outaging branch: BranchID) throws -> PTDFResult {
         guard ptdf.signature == lodf.signature else {
-            throw SensitivityError.topologyMismatch(expected: ptdf.signature,
+            throw SensitivityError.signatureMismatch(expected: ptdf.signature,
                                                     actual: lodf.signature)
         }
         guard branch.index >= 0 && branch.index < ptdf.branchOrder.count else {

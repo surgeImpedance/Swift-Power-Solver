@@ -178,11 +178,11 @@ public struct PTDFResult: Sendable {
     ) throws -> [BranchID: Double] {
         let live = try FactorsSignature.of(network)
         guard live == signature else {
-            throw SensitivityError.topologyMismatch(expected: signature, actual: live)
+            throw SensitivityError.signatureMismatch(expected: signature, actual: live)
         }
         let shiftSig = try PhaseShiftSignature.of(network, factors: live)
         guard shiftSig == phaseShift.signature else {
-            throw SensitivityError.topologyMismatch(expected: signature, actual: live)
+            throw SensitivityError.signatureMismatch(expected: signature, actual: live)
         }
         var p = [Double](repeating: 0, count: busCount)
         for (bus, v) in injections {

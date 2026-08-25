@@ -131,4 +131,91 @@ final class SensitivityAPITests: XCTestCase {
                              r ?? .nan))
         }
     }
+
+    // MARK: - Gate 6.17 (Q1) — the single-bus post-shift is BITWISE identical
+
+    /// `PTDF_networkDefined[:, s] = 0` for a reference bus `s`, so post-shifting
+    /// by `s` subtracts a zero column. On a network with exactly one slack bus,
+    /// `.uniformlyDistributed([s])` must therefore equal `.networkDefined`
+    /// **bitwise** — no tolerance, no oracle.
+    ///
+    /// That identity — changing slack from `s` to `b` is subtraction of column
+    /// `b` — is the whole justification for implementing the case as a
+    /// post-shift instead of opening the frozen build to support an explicit
+    /// reference set. If this gate ever fails, the justification is void.
+    func test617_singleBusPostShiftIsBitwiseIdenticalToNetworkDefined() throws {
+        for name in ["case14", "case39", "case118"] {
+            let net = try ReferenceCase.load(name).network()
+            let slacks = (0..<net.busCount).filter { net.buses[$0].type == .slack }
+            // MODE 1 (empty payload): the identity is only claimed for a single
+            // reference, so a multi-slack fixture would silently test nothing.
+            XCTAssertEqual(slacks.count, 1, "\(name) must have exactly one slack")
+
+            let engine = SensitivityEngine()
+            let nd = try engine.ptdf(net, slack: .networkDefined)
+            let ud = try engine.ptdf(net, slack: .uniformlyDistributed([BusID(slacks[0])]))
+
+            let a = nd.rowMajorValues(), b = ud.rowMajorValues()
+            XCTAssertEqual(a.count, b.count)
+            var differing = 0
+            for i in 0..<min(a.count, b.count)
+            where a[i].bitPattern != b[i].bitPattern { differing += 1 }
+            XCTAssertEqual(differing, 0,
+                "\(name): \(differing) of \(a.count) values differ BITWISE between "
+                + ".networkDefined and .uniformlyDistributed([slack])")
+            note("6.17 \(name): \(a.count) values, \(differing) differing bitwise")
+        }
+    }
+
+    // MARK: - Q2 — C2's graded family against the NEW instrument
+
+    /// The nodal-balance residual was calibrated on healthy cases and the fully
+    /// rank-deficient fixture — **endpoints only**, which is exactly the
+    /// calibration C2 demolished for the previous instrument. Nothing about that
+    /// finding was specific to `‖B_red·x − e‖∞`; it was about what endpoints
+    /// hide. So the graded family runs against THIS instrument before 1e-6 is
+    /// treated as settled.
+    func testQ2_gradedFamilyAgainstNodalBalanceResidual() throws {
+        func gradedTie(xTie: Double?) -> BusBranchNetwork {
+            var branches: [BusBranchNetwork.Branch] = [
+                .init(from: 0, to: 1, r: 0.01, x: 0.10),
+                .init(from: 2, to: 3, r: 0.01, x: 0.10),
+            ]
+            if let xTie { branches.append(.init(from: 1, to: 2, r: 0.01, x: xTie)) }
+            return BusBranchNetwork(
+                baseMVA: 100,
+                buses: [.init(type: .slack, baseKv: 138),
+                        .init(type: .pq, baseKv: 138, pLoadPu: 0.5),
+                        .init(type: .pq, baseKv: 138, pLoadPu: 0.3),
+                        .init(type: .pq, baseKv: 138, pLoadPu: 0.2)],
+                branches: branches,
+                generators: [.init(bus: 0, pPu: 1.0, vSetPu: 1.0)])
+        }
+
+        note("Q2: xTie        nodal residual   engine verdict @1e-6")
+        var residuals: [(Double, Double)] = []
+        for x in [1e-9, 1e-6, 1e-3, 1e-1, 1e0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12, 1e14, 1e16] {
+            let net = gradedTie(xTie: x)
+            let f = DistributionFactors.build(net)
+            let r = SensitivityEngine.nodalBalanceResidual(net, factors: f)
+            residuals.append((x, r))
+            let accepted = (try? SensitivityEngine().ptdf(net)) != nil
+            note(String(format: "Q2: %-10.0e  %-15.6e  %@", x, r,
+                        accepted ? "accepted" : "REFUSED"))
+        }
+        let disconnected = gradedTie(xTie: nil)
+        let dr = SensitivityEngine.nodalBalanceResidual(
+            disconnected, factors: DistributionFactors.build(disconnected))
+        note(String(format: "Q2: (no tie)    %-15.6e  <- rank-deficient endpoint", dr))
+
+        var worstJump = 0.0, jumpAt = ""
+        for i in 1..<residuals.count {
+            let a = max(residuals[i - 1].1, 1e-300), b = max(residuals[i].1, 1e-300)
+            if b / a > worstJump { worstJump = b / a; jumpAt = "\(residuals[i-1].0) -> \(residuals[i].0)" }
+        }
+        note(String(format: "Q2: max residual across the family = %.6e; largest "
+                    + "consecutive jump %.3e x at xTie %@",
+                    residuals.map(\.1).max() ?? 0, worstJump, jumpAt))
+        XCTAssertFalse(residuals.isEmpty)
+    }
 }
