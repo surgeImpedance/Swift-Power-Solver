@@ -9,8 +9,14 @@ solves). Runs on macOS 14+ and iOS 17+ with no third-party dependencies.
 
 **Validated against [pandapower](https://www.pandapower.org) at machine
 precision** on the IEEE 14, 39, and 118 bus systems — the validation harness
-and full-precision reference solutions ship in this repo, so `swift test`
-verifies every number from a bare clone with no Python installed.
+and full-precision reference solutions ship in this repo, so those cases verify
+from a bare clone with no Python installed.
+
+⚠️ **`swift test` on a bare clone reports 6 failures, and that is by design.**
+The large-case gates read multi-megabyte fixtures that are deliberately *not*
+committed; they **fail rather than skip** so a fresh checkout cannot mistake an
+unrun gate for a passing one. One 4-second Python step turns 6 failures into 0 —
+see [Running the full suite](#running-the-full-suite).
 
 ## Scope: this is the solver core
 
@@ -285,11 +291,48 @@ matrix.
 
 ```sh
 swift build
-swift test     # runs the full pandapower validation harness offline
+swift test     # 6 failures on a bare clone — see below, this is expected
 ```
 
 Requires Xcode 16+ / Swift 6 toolchain (the package builds in Swift 5
 language mode) on macOS 14+.
+
+### Running the full suite
+
+Six tests fail on a fresh clone, all from one cause — `SPS_FACTORS_CASES` unset:
+
+| test | what it gates |
+|---|---|
+| `FactorsIdentityTests` | the PTDF/LODF/islanding **bit-identity goldens** |
+| `ConnectivityIslandingTests.testPegaseScaleFixtures` | islanding at pegase scale |
+| `FootprintTests.testCase9241FactorsFootprint` | residency at 9,241 buses |
+| `NearBridgeAccuracyTests.testAtScale` | near-bridge accuracy at scale |
+| `SensitivityAPITests.testUnit2_enginePathFootprintAtScale` | engine-path residency |
+| `SingularFactorsTests.testHealthyResidualAtScale` | the healthy-residual control |
+
+They **fail rather than skip on purpose.** A skipped gate and a passing gate are
+indistinguishable in every summary view, and only one of them is a guarantee —
+so absence of the fixtures is reported as a failure naming the cause.
+
+The fixtures are network definitions dumped from pandapower (1–20 MB), not
+committed because they are reproducible in seconds:
+
+```sh
+pip install pandapower
+python Tools/dump_factors_fixture.py --out-dir /tmp/factors \
+    case300 case1354pegase case9241pegase
+SPS_FACTORS_CASES=/tmp/factors/factors_case300.json,/tmp/factors/factors_case1354.json,/tmp/factors/factors_case9241.json \
+    swift test
+```
+
+Measured 2026-08-26: the dump takes **4.4 s** and the suite then runs **107
+tests, 0 failures, 0 skips**.
+
+⚠️ `FactorsIdentityTests` **rejects a fixture whose `pandapower_version` does not
+match the version its goldens were recorded against**, and says so in the failure
+rather than moving a hash. A digest that moves because the oracle moved and a
+digest that moves because the code moved are indistinguishable in a summary; that
+guard is what separates them.
 
 ## Regenerating the reference solutions
 
