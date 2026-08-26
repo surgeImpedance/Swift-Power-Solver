@@ -149,11 +149,24 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             for g in net.generators.indices where !activeContributors.contains(g) {
                 swGen[g] = 0
             }
-            let total = activeContributors.reduce(0.0) {
+            // `.sorted()` ON BOTH, AND IT IS LOAD-BEARING, NOT TIDINESS.
+            // `activeContributors` is a `Set<Int>`, and Swift randomizes Set
+            // iteration order per PROCESS. Folding a sum over it — and
+            // accumulating into `swBus` — therefore adds the same numbers in a
+            // different order on every launch, and floating-point addition is
+            // not associative: the result moves by 1-2 ULP between runs of the
+            // same input. That is D-RL-04. Measured here before the fix: a
+            // network with a P-limit pin and weights 1.0 against five at
+            // 1.1e-16 produced THREE distinct output digests across 16 launches
+            // of one binary. The site at :237 below was already sorted, which
+            // is what made these two read as oversights rather than a
+            // convention.
+            let ordered = activeContributors.sorted()
+            let total = ordered.reduce(0.0) {
                 $0 + (net.generators[$1].slackWeight ?? 0)
             }
             guard total > 0 else { return }
-            for g in activeContributors {
+            for g in ordered {
                 swGen[g] = (net.generators[g].slackWeight ?? 0) / total
                 swBus[net.generators[g].bus] += swGen[g]
             }
