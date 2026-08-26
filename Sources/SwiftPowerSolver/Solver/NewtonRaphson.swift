@@ -20,6 +20,58 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
 
     public init() {}
 
+    /// D-RL-04 SEAM. Normalized distributed-slack participation, as a pure
+    /// function of an **ordered sequence** of contributor indices.
+    ///
+    /// Extracted for two reasons, both learned the hard way:
+    ///
+    /// 1. **The order is load-bearing.** `total` is a fold, floating-point
+    ///    addition is not associative, and `swBus` accumulates — so feeding the
+    ///    same contributors in a different order moves the result by 1-2 ULP.
+    ///    Taking `[Int]` rather than reaching for a `Set` internally means a
+    ///    caller cannot accidentally supply a per-process-random order, and a
+    ///    test can supply several explicit orders and assert bit-identity in ONE
+    ///    launch. `SlackWeightDeterminismTests` does exactly that; before this
+    ///    seam existed the only available control was probabilistic (~70% per
+    ///    launch, because the hash seed sometimes happens to produce sorted
+    ///    order).
+    /// 2. **This computation had two copies and they diverged.** The initial
+    ///    normalization folded over an Array and was correct; the re-normalize
+    ///    after a P-limit pin folded over a `Set` and was not. That is D-RL-04.
+    ///    One copy cannot diverge from itself.
+    ///
+    /// ⚠️ **IT SORTS DEFENSIVELY, AND THAT IS THE POINT — do not remove it as
+    /// redundant.** Both callers already pass ascending indices, so the sort is
+    /// numerically a no-op today and every golden is unchanged by it. What it
+    /// buys is that the guarantee stops depending on caller discipline.
+    ///
+    /// This was NOT the original fix, and the difference is worth recording.
+    /// The first fix sorted at the two call sites, which made the output
+    /// *deterministic* — same input, same answer, every launch. A permutation
+    /// test written afterwards then FAILED, and it was right to: the fold is
+    /// still order-**dependent**, it had merely been pinned to one order.
+    /// Sorting at the call site cannot be checked in one launch (the only
+    /// available control was ~70% probabilistic, waiting on the hash seed);
+    /// sorting *here* can, because the property becomes local. Determinism and
+    /// order-invariance are different guarantees and the first fix bought only
+    /// the first.
+    ///
+    /// `swGen` is indexed by generator, `swBus` by bus and **accumulated into**
+    /// — callers that re-normalize must zero it first. A non-positive total is
+    /// a no-op, leaving both untouched.
+    static func normalizeParticipation(ordered: [Int],
+                                       generators: [BusBranchNetwork.Generator],
+                                       swGen: inout [Double],
+                                       swBus: inout [Double]) {
+        let ordered = ordered.sorted()
+        let total = ordered.reduce(0.0) { $0 + (generators[$1].slackWeight ?? 0) }
+        guard total > 0 else { return }
+        for g in ordered {
+            swGen[g] = (generators[g].slackWeight ?? 0) / total
+            swBus[generators[g].bus] += swGen[g]
+        }
+    }
+
     public func solve(_ net: BusBranchNetwork,
                       options: PowerFlowOptions = PowerFlowOptions()) -> PowerFlowSolution {
         let n = net.busCount
@@ -61,11 +113,11 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         var swGen = [Double](repeating: 0, count: net.generators.count)  // per-gen, normalized
         var swBus = [Double](repeating: 0, count: n)                     // per-bus, normalized
         if distributed {
-            let total = contributors.reduce(0.0) { $0 + (net.generators[$1].slackWeight ?? 0) }
-            for g in contributors {
-                swGen[g] = (net.generators[g].slackWeight ?? 0) / total
-                swBus[net.generators[g].bus] += swGen[g]
-            }
+            // `contributors` is `indices.filter`, i.e. ascending — already the
+            // deterministic order the seam requires.
+            Self.normalizeParticipation(ordered: contributors,
+                                        generators: net.generators,
+                                        swGen: &swGen, swBus: &swBus)
         }
 
         // --- specified injections (pu) --------------------------------------
@@ -149,27 +201,16 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             for g in net.generators.indices where !activeContributors.contains(g) {
                 swGen[g] = 0
             }
-            // `.sorted()` ON BOTH, AND IT IS LOAD-BEARING, NOT TIDINESS.
-            // `activeContributors` is a `Set<Int>`, and Swift randomizes Set
-            // iteration order per PROCESS. Folding a sum over it — and
-            // accumulating into `swBus` — therefore adds the same numbers in a
-            // different order on every launch, and floating-point addition is
-            // not associative: the result moves by 1-2 ULP between runs of the
-            // same input. That is D-RL-04. Measured here before the fix: a
-            // network with a P-limit pin and weights 1.0 against five at
-            // 1.1e-16 produced THREE distinct output digests across 16 launches
-            // of one binary. The site at :237 below was already sorted, which
-            // is what made these two read as oversights rather than a
-            // convention.
-            let ordered = activeContributors.sorted()
-            let total = ordered.reduce(0.0) {
-                $0 + (net.generators[$1].slackWeight ?? 0)
-            }
-            guard total > 0 else { return }
-            for g in ordered {
-                swGen[g] = (net.generators[g].slackWeight ?? 0) / total
-                swBus[net.generators[g].bus] += swGen[g]
-            }
+            // `.sorted()` IS LOAD-BEARING, NOT TIDINESS. `activeContributors`
+            // is a `Set<Int>` and Swift randomizes Set iteration order per
+            // PROCESS, so an unsorted fold adds the same numbers in a different
+            // order on every launch — 1-2 ULP of drift on identical input.
+            // That is D-RL-04. Measured before the fix: a network with a
+            // P-limit pin and weights 1.0 against five at 1.1e-16 produced
+            // THREE distinct output digests across 16 launches of one binary.
+            Self.normalizeParticipation(ordered: Array(activeContributors),
+                                        generators: net.generators,
+                                        swGen: &swGen, swBus: &swBus)
         }
 
         for _ in 0...max(1, net.generators.count) {
