@@ -106,7 +106,12 @@ public enum SensitivityError: Error, Equatable, Sendable {
     case shiftSignatureMismatch(expected: PhaseShiftSignature, actual: PhaseShiftSignature)
     case islandingOutage(BranchID)
     case singularAdmittanceMatrix(worstResidual: Double?)
-    case disconnectedNetwork
+    // `.disconnectedNetwork` was REMOVED 2026-08-29. Born in this enum's first
+    // sketch (`6aba5b4`) and never thrown by any path: island-spanning
+    // reference sets throw `.invalidReference`, a slackless island is control
+    // 2's `.singularAdmittanceMatrix`, and a disconnecting outage is
+    // `.islandingOutage`. A public case no path can produce invites catch
+    // arms that can never fire.
     case invalidParticipationFactors(String)
     /// A reference set that names a bus the network cannot reference.
     case invalidReference(String)

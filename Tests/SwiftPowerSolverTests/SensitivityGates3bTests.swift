@@ -116,7 +116,8 @@ final class SensitivityGates3bTests: XCTestCase {
                 absent fixture must NOT read as a pass. Regenerate:
                   python Tools/dump_reference.py ptdf shifter
                 """)
-            throw SensitivityError.disconnectedNetwork   // unreachable past XCTFail
+            throw SensitivityError.invalidNetworkParameter(
+                "unreachable past XCTFail — fixture missing")
         }
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
