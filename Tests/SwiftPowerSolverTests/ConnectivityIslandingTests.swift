@@ -27,7 +27,25 @@ final class ConnectivityIslandingTests: XCTestCase {
         }
     }
 
-    private func compare(_ name: String, _ net: BusBranchNetwork) {
+    /// RATCHETED BASELINE for the scale comparison — the shipped-vs-h-based
+    /// `differing` count per case, pinned 2026-08-29 from a measured run over
+    /// the committed fixtures (that run's margins: worst bridge |1−h| =
+    /// 2.5e-13 against closest non-bridge 5.3e-4 on case9241 — not close).
+    ///
+    /// The scale test FAILS on a RISE. A FALL is a finding to report, never
+    /// an auto-re-baseline. Re-baselining in EITHER direction requires a
+    /// written justification recorded HERE, beside the pinned values — the
+    /// same standing as the AG2 ratchet's corpus-size record. Hard equality
+    /// was deliberately declined: C2 measured that the two classifiers can
+    /// diverge legitimately at conditioning extremes, so a rise can be a
+    /// CORRECT result — the ratchet's job is to make it a visible one
+    /// instead of a note scrolling past in a log.
+    private static let pinnedDiffering: [String: Int] = [
+        "case300": 0, "case1354": 0, "case9241": 0,
+    ]
+
+    @discardableResult
+    private func compare(_ name: String, _ net: BusBranchNetwork) -> Int {
         let factors = DistributionFactors.build(net)
         let nbr = net.branches.count
         let hBased = (0..<nbr).map { factors.isIslanding(outage: $0) }
@@ -93,6 +111,7 @@ final class ConnectivityIslandingTests: XCTestCase {
                     + "non-bridge |1-h| = %.3e (branch %d), epsilon = 1e-9, "
                     + "x spread = %.3e",
                     name, worstBridgeDev, closestNonBridgeDev, closestNonBridge, spread))
+        return differing.count
     }
 
     /// STRUCTURAL COVERAGE (J1 mode 1, applied per structural case rather than
@@ -161,7 +180,25 @@ final class ConnectivityIslandingTests: XCTestCase {
         for path in paths {
             let f = try decoder.decode(FactorsIdentityTests.NetworkFixture.self,
                                        from: Data(contentsOf: URL(fileURLWithPath: path)))
-            compare(f.name, f.network())
+            let differing = compare(f.name, f.network())
+
+            // The ratchet (see `pinnedDiffering`): a rise FAILS; a fall is a
+            // reported finding, never an auto-re-baseline.
+            guard let pinned = Self.pinnedDiffering[f.name] else {
+                XCTFail("\(f.name): no pinned `differing` baseline — pin one "
+                        + "(with its justification) before this case joins the scale set")
+                continue
+            }
+            XCTAssertLessThanOrEqual(
+                differing, pinned,
+                "\(f.name): shipped-vs-h `differing` ROSE above the pinned \(pinned). "
+                + "A rise can be legitimate (C2's conditioning extremes) but is never "
+                + "silent — re-baselining requires a written justification beside "
+                + "`pinnedDiffering`.")
+            if differing < pinned {
+                note("D2 \(f.name): differing=\(differing) FELL below the pinned "
+                     + "\(pinned) — a FINDING to report, not an auto-re-baseline")
+            }
         }
     }
 }
