@@ -38,10 +38,47 @@ public struct SensitivityEngine: Sendable {
     /// not live here (C1).
     public func ptdf(_ net: BusBranchNetwork,
                      slack: SlackReference = .networkDefined) throws -> PTDFResult {
+        // Total: `ptdfCore` returns nil only when a cancellation hook fires,
+        // and this entry passes none.
+        try ptdfCore(net, slack: slack, isCancelled: nil)!
+    }
+
+    /// `ptdf(_:slack:)` with a cooperative cancellation hook — the entry a
+    /// consumer with a cancellable UI uses INSTEAD of going around the engine
+    /// to `DistributionFactors.buildCancellable` (stage 1 of the ruled seam
+    /// close, 2026-08-29).
+    ///
+    /// **Contract (frozen by publishing this):** `nil` means CANCELLED and
+    /// nothing else — the same idiom `buildCancellable` already documents;
+    /// nothing partial is observable and nothing is cached. Cancellation is
+    /// deliberately NOT a thrown error: the throw channel is where control 2's
+    /// refusal lives, and a consumer must never be able to swallow a refusal
+    /// and a cancel with one catch arm. The hook is polled between build
+    /// stages and once per parallel row chunk (inherited from
+    /// `buildCancellable`; ~2 s worst-case latency at 9,241 buses).
+    ///
+    /// **A non-nil result passed the residual guard** (when
+    /// `residualTolerance` is non-nil), exactly as for `ptdf(_:slack:)` —
+    /// both entries and `lodf`'s self-build run through one core, so there is
+    /// no variant of this engine that skips control 2.
+    public func ptdf(_ net: BusBranchNetwork,
+                     slack: SlackReference = .networkDefined,
+                     isCancelled: @escaping @Sendable () -> Bool) throws -> PTDFResult? {
+        try ptdfCore(net, slack: slack, isCancelled: isCancelled)
+    }
+
+    /// THE one code path from a network to a `PTDFResult`. Every public entry
+    /// — both `ptdf` overloads and `lodf`'s self-build branch — lands here,
+    /// which is the mechanism (not the promise) that keeps control 2 single:
+    /// `nodalBalanceResidual` has exactly one caller in the module, and no
+    /// entry can reach a factors build around it.
+    private func ptdfCore(_ net: BusBranchNetwork, slack: SlackReference,
+                          isCancelled: (@Sendable () -> Bool)?) throws -> PTDFResult? {
         let signature = try FactorsSignature.of(net)
         _ = try classify(net, slack: slack)          // validates the reference scheme
 
-        let factors = DistributionFactors.build(net)
+        guard let factors = DistributionFactors.buildCancellable(
+            net, isCancelled: isCancelled) else { return nil }
         let n = net.busCount, nbr = net.branches.count
         let branchOrder = (0..<nbr).map(BranchID.init)
         let busOrder = (0..<n).map(BusID.init)
@@ -111,8 +148,23 @@ public struct SensitivityEngine: Sendable {
                                                     actual: signature)
         }
         let factors: DistributionFactors
-        if case .base(let f)? = ptdf?.storage { factors = f }
-        else { factors = DistributionFactors.build(net) }
+        if case .base(let f)? = ptdf?.storage {
+            factors = f
+        } else {
+            // Self-build goes through the SAME guarded core as `ptdf` — until
+            // 2026-08-29 this branch called `DistributionFactors.build`
+            // directly, so a standalone `lodf(net)` on a rank-deficient
+            // network returned garbage values through the engine's own front
+            // door while `ptdf` refused. One core, no variant that skips
+            // control 2: this call now throws `.singularAdmittanceMatrix`
+            // there instead. Total force-unwrap: no cancellation hook.
+            let built = try ptdfCore(net, slack: .networkDefined, isCancelled: nil)!
+            guard case .base(let f) = built.storage else {
+                throw SensitivityError.invalidNetworkParameter(
+                    "unreachable: a .networkDefined core build is always .base storage")
+            }
+            factors = f
+        }
 
         let nbr = net.branches.count
         let live = net.buses.map { $0.type != .isolated }

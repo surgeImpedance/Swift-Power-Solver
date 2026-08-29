@@ -6,6 +6,10 @@ import XCTest
 /// constraint) plus the calibration measurement the shipped
 /// `SensitivityEngine.defaultResidualTolerance` cites. Gates 6.1–6.13, 6.15 and
 /// 6.16 are unit 3's.
+private extension Duration {
+    var ms: Double { Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15 }
+}
+
 final class SensitivityAPITests: XCTestCase {
 
     private func note(_ m: String) {
@@ -140,6 +144,98 @@ final class SensitivityAPITests: XCTestCase {
         XCTAssertEqual(try PhaseShiftSignature.of(net).factors,
                        try FactorsSignature.of(net),
                        "the public path must embed the same factors signature")
+    }
+
+    // MARK: - Stage 1: the cancellable entry, with control 2 on it
+
+    /// The rank-deficient fixture: two islands, a slack in only one — the
+    /// same shape `testResidualCalibration` and `SingularFactorsTests` use.
+    private func twoIslandOneSlack() -> BusBranchNetwork {
+        BusBranchNetwork(
+            baseMVA: 100,
+            buses: [.init(type: .slack, baseKv: 138), .init(type: .pq, baseKv: 138, pLoadPu: 0.5),
+                    .init(type: .pq, baseKv: 138, pLoadPu: 0.3), .init(type: .pq, baseKv: 138, pLoadPu: 0.2)],
+            branches: [.init(from: 0, to: 1, r: 0.01, x: 0.10),
+                       .init(from: 2, to: 3, r: 0.01, x: 0.10)],
+            generators: [.init(bus: 0, pPu: 1.0, vSetPu: 1.0)])
+    }
+
+    /// GATE 2 of stage 1: the cancellable entry is BEHIND control 2, not
+    /// beside it — it refuses the singular fixture with the SAME error the
+    /// existing entry throws (compared as values, residual payload included).
+    /// The inversion — disable the guard in `ptdfCore` and this test goes red
+    /// — is run as a scratch mutation and recorded in the session report, so
+    /// a pass here is not the tautology mode.
+    func testCancellableEntryRefusesTheSingularFixture() throws {
+        let net = twoIslandOneSlack()
+        let engine = SensitivityEngine()
+
+        var fromExisting: SensitivityError?
+        do { _ = try engine.ptdf(net) } catch let e as SensitivityError { fromExisting = e }
+        var fromCancellable: SensitivityError?
+        do { _ = try engine.ptdf(net, isCancelled: { false }) }
+        catch let e as SensitivityError { fromCancellable = e }
+
+        guard case .singularAdmittanceMatrix? = fromExisting else {
+            return XCTFail("existing entry did not refuse: \(String(describing: fromExisting))")
+        }
+        guard case .singularAdmittanceMatrix? = fromCancellable else {
+            return XCTFail("cancellable entry did not refuse: \(String(describing: fromCancellable))")
+        }
+        XCTAssertEqual(fromExisting, fromCancellable,
+                       "both entries must throw the SAME refusal, residual payload included "
+                       + "— one control, one door")
+    }
+
+    /// The pre-existing second door, closed: standalone `lodf(net)` used to
+    /// build factors directly (no residual check) and returned garbage LODF
+    /// values on this fixture. Through the guarded core it refuses instead.
+    func testStandaloneLodfIsGuarded() throws {
+        XCTAssertThrowsError(try SensitivityEngine().lodf(twoIslandOneSlack())) { err in
+            guard case SensitivityError.singularAdmittanceMatrix = err else {
+                return XCTFail("expected .singularAdmittanceMatrix, got \(err)")
+            }
+        }
+    }
+
+    /// GATE 3 of stage 1: cancellation ABANDONS the build rather than being
+    /// checked after the work finished. The hook cancels on its third poll —
+    /// past classification, inside the build proper — so nil proves
+    /// abandonment of work that had genuinely started. Asserted on STATE
+    /// (nil result + poll count), never on wall-clock, per the house rule on
+    /// timing-dependent controls; elapsed times are noted as measurement.
+    func testCancellationAbandonsTheBuildMidway() throws {
+        guard let path = FactorsIdentityTests.factorsCasePaths()
+                  .first(where: { $0.contains("9241") }) else {
+            return XCTFail("case9241 fixture missing — the mid-build cancel needs a real build")
+        }
+        let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+        let net = try d.decode(FactorsIdentityTests.NetworkFixture.self,
+                               from: Data(contentsOf: URL(fileURLWithPath: path))).network()
+
+        final class Polls: @unchecked Sendable {
+            private let lock = NSLock()
+            private var n = 0
+            func bump() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+        }
+        let polls = Polls()
+
+        let t0 = ContinuousClock.now
+        let cancelled = try SensitivityEngine().ptdf(net, isCancelled: { polls.bump() >= 3 })
+        let cancelMs = (ContinuousClock.now - t0).ms
+
+        XCTAssertNil(cancelled, "a fired hook must yield nil — the cancellation contract")
+        XCTAssertGreaterThanOrEqual(polls.count, 3,
+            "the hook must have been polled into the build proper; fewer polls "
+            + "means the cancel fired before any work it could abandon")
+
+        let t1 = ContinuousClock.now
+        let full = try SensitivityEngine().ptdf(net)
+        let fullMs = (ContinuousClock.now - t1).ms
+        XCTAssertEqual(full.branchOrder.count, net.branches.count)
+        note(String(format: "stage1 CANCEL case9241: cancelled after %d polls in %.0f ms; "
+                    + "full build (same session) %.0f ms", polls.count, cancelMs, fullMs))
     }
 
     // MARK: - Calibration for `defaultResidualTolerance` (NOT a gate)
