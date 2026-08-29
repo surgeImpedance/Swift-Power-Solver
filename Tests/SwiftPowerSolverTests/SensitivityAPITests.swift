@@ -143,10 +143,10 @@ final class SensitivityAPITests: XCTestCase {
     /// Baselines: build 3,845 ms / 4,126 ms; peak `phys_footprint` 5.796 GiB.
     /// Those are the two quantities the iPad decision depends on (D67).
     func testUnit2_enginePathFootprintAtScale() throws {
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"],
-              let path = paths.split(separator: ",").map(String.init)
+        guard let path = FactorsIdentityTests.factorsCasePaths()
                   .first(where: { $0.contains("9241") }) else {
-            XCTFail("SPS_FACTORS_CASES must include case9241 for the unit 2 measurement")
+            XCTFail("No case9241 fixture (env unset AND committed copy missing) "
+                    + "— the unit 2 measurement cannot run")
             return
         }
         let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase

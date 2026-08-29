@@ -59,6 +59,24 @@ final class FactorsIdentityTests: XCTestCase {
     /// pins the half that can be pinned.
     static let goldenPandapowerVersion = "3.2.1"
 
+    /// The three scale-fixture paths. `SPS_FACTORS_CASES` still overrides
+    /// (comma-separated, unchanged semantics); otherwise the COMMITTED copies
+    /// in `FactorsFixtures/` are used, so a bare clone runs every gate
+    /// (fixture home ruled 2026-08-29). Missing committed files return an
+    /// empty array — callers FAIL on that, never skip (C3): with the fixtures
+    /// committed, absence is repo corruption, not a fresh-clone state.
+    static func factorsCasePaths() -> [String] {
+        if let env = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] {
+            return env.split(separator: ",").map(String.init)
+        }
+        let names = ["factors_case300", "factors_case1354", "factors_case9241"]
+        let urls = names.compactMap {
+            Bundle.module.url(forResource: $0, withExtension: "json",
+                              subdirectory: "FactorsFixtures")
+        }
+        return urls.count == names.count ? urls.map(\.path) : []
+    }
+
     // Visibility widened (private -> internal) at unit 0 so the four probe
     // decoders could be deleted and repointed here. NOTHING ELSE about this
     // type changed: it is ON the golden path (fixture -> decode -> build ->
@@ -107,24 +125,24 @@ final class FactorsIdentityTests: XCTestCase {
         // prevent: this gate is named never-regress in CLAUDE.md and was
         // silently unrunnable in a fresh checkout for an unknown span, because
         // a skip is indistinguishable from a pass in every summary view.
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
+        let paths = Self.factorsCasePaths()
+        guard !paths.isEmpty else {
             XCTFail("""
-                SPS_FACTORS_CASES unset — the bit-identity gate cannot run.
-                This is a FAILURE, not a skip: an absent fixture must not read \
-                as a pass. Regenerate (about 30 s) and re-run:
+                No scale fixtures: SPS_FACTORS_CASES is unset AND the committed \
+                FactorsFixtures/ copies are missing from the test bundle — \
+                the bit-identity gate cannot run. This is a FAILURE, not a \
+                skip: an absent fixture must not read as a pass. Regenerate:
 
-                  python Tools/dump_factors_fixture.py --out-dir /tmp \
+                  python Tools/dump_factors_fixture.py \
+                      --out-dir Tests/SwiftPowerSolverTests/FactorsFixtures \
                       case300 case1354pegase case9241pegase
-                  SPS_FACTORS_CASES=/tmp/factors_case300.json,\
-                /tmp/factors_case1354.json,/tmp/factors_case9241.json \
-                      swift test -c release --filter FactorsIdentityTests
                 """)
             return
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
 
-        for path in paths.split(separator: ",").map(String.init) {
+        for path in paths {
             let fixture = try decoder.decode(NetworkFixture.self,
                                              from: Data(contentsOf: URL(fileURLWithPath: path)))
 

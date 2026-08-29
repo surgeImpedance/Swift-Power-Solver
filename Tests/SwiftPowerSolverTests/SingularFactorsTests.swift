@@ -245,14 +245,16 @@ final class SingularFactorsTests: XCTestCase {
     /// AT SCALE stay well below that. Reads the same fixtures as
     /// FactorsIdentityTests.
     func testHealthyResidualAtScale() throws {
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
-            XCTFail("SPS_FACTORS_CASES unset — cannot measure the at-scale residual. "
+        let paths = FactorsIdentityTests.factorsCasePaths()
+        guard !paths.isEmpty else {
+            XCTFail("No scale fixtures (env unset AND committed copies missing) "
+                    + "— cannot measure the at-scale residual. "
                     + "Regenerate with Tools/dump_factors_fixture.py")
             return
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        for path in paths.split(separator: ",").map(String.init) {
+        for path in paths {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
             let fixture = try decoder.decode(FactorsIdentityTests.NetworkFixture.self, from: data)
             let net = fixture.network()

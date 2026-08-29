@@ -163,13 +163,15 @@ final class NearBridgeAccuracyTests: XCTestCase {
     }
 
     func testAtScale() throws {
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
-            XCTFail("SPS_FACTORS_CASES unset — E2 cannot measure at scale.")
+        let paths = FactorsIdentityTests.factorsCasePaths()
+        guard !paths.isEmpty else {
+            XCTFail("No scale fixtures (env unset AND committed copies missing) "
+                    + "— E2 cannot measure at scale.")
             return
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        for path in paths.split(separator: ",").map(String.init) {
+        for path in paths {
             let f = try decoder.decode(FactorsIdentityTests.NetworkFixture.self,
                                        from: Data(contentsOf: URL(fileURLWithPath: path)))
             measure(f.name, f.network())

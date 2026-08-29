@@ -12,7 +12,7 @@ let package = Package(
         .testTarget(
             name: "SwiftPowerSolverTests",
             dependencies: ["SwiftPowerSolver"],
-            resources: [.copy("Reference")]
+            resources: [.copy("Reference"), .copy("FactorsFixtures")]
         ),
     ],
     swiftLanguageModes: [.v5]

@@ -129,13 +129,11 @@ final class ConnectivityIslandingTests: XCTestCase {
         for n in ["case14", "case39", "case118"] {
             report(n, try ReferenceCase.load(n).network())
         }
-        if let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] {
-            let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
-            for p in paths.split(separator: ",").map(String.init) {
-                let f = try d.decode(FactorsIdentityTests.NetworkFixture.self,
-                                     from: Data(contentsOf: URL(fileURLWithPath: p)))
-                report(f.name, f.network())
-            }
+        let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+        for p in FactorsIdentityTests.factorsCasePaths() {
+            let f = try d.decode(FactorsIdentityTests.NetworkFixture.self,
+                                 from: Data(contentsOf: URL(fileURLWithPath: p)))
+            report(f.name, f.network())
         }
         report("twoIslandOneSlack", BusBranchNetwork(
             baseMVA: 100,
@@ -153,14 +151,16 @@ final class ConnectivityIslandingTests: XCTestCase {
     }
 
     func testPegaseScaleFixtures() throws {
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"] else {
-            XCTFail("SPS_FACTORS_CASES unset — D2 cannot compare at scale. "
+        let paths = FactorsIdentityTests.factorsCasePaths()
+        guard !paths.isEmpty else {
+            XCTFail("No scale fixtures (env unset AND committed copies missing) "
+                    + "— D2 cannot compare at scale. "
                     + "Regenerate with Tools/dump_factors_fixture.py")
             return
         }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        for path in paths.split(separator: ",").map(String.init) {
+        for path in paths {
             let f = try decoder.decode(FactorsIdentityTests.NetworkFixture.self,
                                        from: Data(contentsOf: URL(fileURLWithPath: path)))
             compare(f.name, f.network())

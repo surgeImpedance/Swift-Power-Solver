@@ -41,10 +41,9 @@ final class FootprintTests: XCTestCase {
     }
 
     func testCase9241FactorsFootprint() throws {
-        guard let paths = ProcessInfo.processInfo.environment["SPS_FACTORS_CASES"],
-              let path = paths.split(separator: ",").map(String.init)
+        guard let path = FactorsIdentityTests.factorsCasePaths()
                   .first(where: { $0.contains("9241") }) else {
-            XCTFail("SPS_FACTORS_CASES must include the case9241 fixture for D6.")
+            XCTFail("No case9241 fixture (env unset AND committed copy missing) — D6 cannot run.")
             return
         }
         let decoder = JSONDecoder()

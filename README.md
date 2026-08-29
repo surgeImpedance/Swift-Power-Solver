@@ -12,11 +12,12 @@ precision** on the IEEE 14, 39, and 118 bus systems — the validation harness
 and full-precision reference solutions ship in this repo, so those cases verify
 from a bare clone with no Python installed.
 
-⚠️ **`swift test` on a bare clone reports 6 failures, and that is by design.**
-The large-case gates read multi-megabyte fixtures that are deliberately *not*
-committed; they **fail rather than skip** so a fresh checkout cannot mistake an
-unrun gate for a passing one. One 4-second Python step turns 6 failures into 0 —
-see [Running the full suite](#running-the-full-suite).
+The large-case gates read their fixtures from the committed
+`Tests/SwiftPowerSolverTests/FactorsFixtures/` copies (3.9 MB total, since
+2026-08-29), so **a bare clone runs the full suite with no Python installed**.
+`SPS_FACTORS_CASES` overrides the committed copies; if both are absent the
+gates **fail rather than skip**, so a checkout cannot mistake an unrun gate
+for a passing one — see [Running the full suite](#running-the-full-suite).
 
 ## Scope: this is the solver core
 
@@ -291,7 +292,7 @@ matrix.
 
 ```sh
 swift build
-swift test     # 6 failures on a bare clone — see below, this is expected
+swift test     # full suite, Python-free — fixtures are committed
 ```
 
 Requires Xcode 16+ / Swift 6 toolchain (the package builds in Swift 5
@@ -299,7 +300,11 @@ language mode) on macOS 14+.
 
 ### Running the full suite
 
-Six tests fail on a fresh clone, all from one cause — `SPS_FACTORS_CASES` unset:
+Six tests read the large-case fixtures. Since 2026-08-29 those are
+**committed** — `Tests/SwiftPowerSolverTests/FactorsFixtures/`,
+`factors_case300.json` (92 KB) / `factors_case1354.json` (447 KB) /
+`factors_case9241.json` (3.3 MB), dumped by pandapower 3.2.1 — so a bare
+clone runs all of them:
 
 | test | what it gates |
 |---|---|
@@ -310,23 +315,24 @@ Six tests fail on a fresh clone, all from one cause — `SPS_FACTORS_CASES` unse
 | `SensitivityAPITests.testUnit2_enginePathFootprintAtScale` | engine-path residency |
 | `SingularFactorsTests.testHealthyResidualAtScale` | the healthy-residual control |
 
-They **fail rather than skip on purpose.** A skipped gate and a passing gate are
-indistinguishable in every summary view, and only one of them is a guarantee —
-so absence of the fixtures is reported as a failure naming the cause.
+`SPS_FACTORS_CASES` (comma-separated paths) **overrides** the committed
+copies, unchanged semantics. If it is unset *and* the committed copies are
+missing, the gates **fail rather than skip on purpose**: a skipped gate and a
+passing gate are indistinguishable in every summary view, and only one of
+them is a guarantee — so absence is reported as a failure naming the cause.
 
-The fixtures are network definitions dumped from pandapower (1–20 MB), not
-committed because they are reproducible in seconds:
+To regenerate the fixtures (only needed when the dump schema or the oracle
+version changes):
 
 ```sh
-pip install pandapower
-python Tools/dump_factors_fixture.py --out-dir /tmp/factors \
+pip install pandapower  # goldens are a claim about 3.2.1 — see below
+python Tools/dump_factors_fixture.py \
+    --out-dir Tests/SwiftPowerSolverTests/FactorsFixtures \
     case300 case1354pegase case9241pegase
-SPS_FACTORS_CASES=/tmp/factors/factors_case300.json,/tmp/factors/factors_case1354.json,/tmp/factors/factors_case9241.json \
-    swift test
 ```
 
-Measured 2026-08-26: the dump takes **4.4 s** and the suite then runs **107
-tests, 0 failures, 0 skips**.
+Measured 2026-08-29: the dump takes **6.4 s** and the bare-clone suite runs
+**107 tests, 0 failures, 0 skips** in 39.5 s (release).
 
 ⚠️ `FactorsIdentityTests` **rejects a fixture whose `pandapower_version` does not
 match the version its goldens were recorded against**, and says so in the failure
