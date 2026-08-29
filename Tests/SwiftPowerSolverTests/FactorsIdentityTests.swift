@@ -35,7 +35,7 @@ import XCTest
 /// the islanding vector, prints one `FACTORS …` line per case, and compares
 /// against the goldens below.
 ///
-/// GOLDENS are the output of the ORIGINAL algorithm at commit 24895bc,
+/// GOLDENS are the output of the ORIGINAL algorithm at commit 4da8e44,
 /// recorded before any optimization of the build. Every subsequent change to
 /// the build (CSC radix assembly, batched multi-RHS solve, loop reordering,
 /// parallel fill) must reproduce them EXACTLY — bit identity is the
@@ -46,7 +46,11 @@ final class FactorsIdentityTests: XCTestCase {
     /// SHA-256 over the row-major matrix bytes, read through the PUBLIC
     /// accessors so the hash is independent of internal storage layout.
     static let golden: [String: (ptdf: String, lodf: String, islanding: String)] = [
-        // Recorded 2026-08-13 at 24895bc (pre-optimization), macOS arm64.
+        // Recorded 2026-08-13 at 4da8e44 (pre-optimization), macOS arm64.
+        // SHA repointed 2026-08-29: the whole history was identity-rewritten
+        // (43 commits, metadata only, root trees verified identical); this
+        // commit was 24895bc before the rewrite, and the old objects stay
+        // reachable locally via the `pre-rewrite-backup` tag.
         "case300": (ptdf: "c7a532cf786cd021", lodf: "b615538c61ad7d78", islanding: "69fc9f47c69e7f0a"),
         "case1354": (ptdf: "b217d6c62ad20982", lodf: "c7544e4b3cd16ebe", islanding: "4ca9ad2e58a532c3"),
         "case9241": (ptdf: "62bb035e5223ad58", lodf: "eaed1f025bd042b4", islanding: "61526d6902be8eea"),
@@ -192,8 +196,8 @@ final class FactorsIdentityTests: XCTestCase {
 
             guard let want = Self.golden[fixture.name] else { continue }
             if want.ptdf == "RECORD" { continue }   // record mode: print only
-            XCTAssertEqual(ptdfHash, want.ptdf, "\(fixture.name): PTDF diverged from 24895bc")
-            XCTAssertEqual(lodfHash, want.lodf, "\(fixture.name): LODF diverged from 24895bc")
+            XCTAssertEqual(ptdfHash, want.ptdf, "\(fixture.name): PTDF diverged from 4da8e44")
+            XCTAssertEqual(lodfHash, want.lodf, "\(fixture.name): LODF diverged from 4da8e44")
             XCTAssertEqual(islHash, want.islanding, "\(fixture.name): islanding set diverged")
         }
     }

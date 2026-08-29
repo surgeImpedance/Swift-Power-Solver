@@ -89,7 +89,7 @@ enum SparseLinearSolver {
                     //    SparseSolve arithmetic as the sequential original;
                     //  - column c writes only slice c — no shared state, no
                     //    reduction order for scheduling to disturb.
-                    // FactorsIdentityTests pins all of this against 24895bc.
+                    // FactorsIdentityTests pins all of this against 4da8e44.
                     //
                     // Variants tried and REJECTED, for the record:
                     //  - One-call DenseMatrix_Double batch solve: ~4x faster

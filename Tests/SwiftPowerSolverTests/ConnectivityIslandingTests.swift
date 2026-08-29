@@ -10,7 +10,7 @@ import XCTest
 /// `FactorsIdentityTests` pins the islanding vector by hash
 /// (case300 `69fc9f47c69e7f0a`, and the case1354 / case9241 equivalents). If
 /// connectivity disagrees anywhere, the golden pins a MISCLASSIFICATION and has
-/// since `24895bc` — a finding, not an obstacle.
+/// since `4da8e44` — a finding, not an obstacle.
 ///
 /// D42 measured coextensivity app-side on 135 branches. The pegase cases carry
 /// 16,049 branches and a far wider reactance spread, which is exactly where the
@@ -62,7 +62,7 @@ final class ConnectivityIslandingTests: XCTestCase {
         // (An earlier paragraph here argued the probe must outlive the delete;
         // that was unit 1b's SEQUENCING rationale — compare three ways FIRST,
         // then delete — and it read as present-tense long after the delete
-        // landed. Removed 2026-08-29; the history lives in `73c2102`.)
+        // landed. Removed 2026-08-29; the history lives in `b8a956b`.)
         let structural = NetworkConnectivity.bridgeBranches(net)   // SHIPPED
 
         let hHash = Self.sha(hBased.map { $0 ? 1.0 : 0.0 })
