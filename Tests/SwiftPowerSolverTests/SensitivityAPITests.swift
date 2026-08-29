@@ -124,6 +124,24 @@ final class SensitivityAPITests: XCTestCase {
         }
     }
 
+    /// The widening ruled 2026-08-29: a consumer can RECOMPUTE the shift
+    /// signature from a network, so "are these terms current for this
+    /// network" is checkable without calling the flow path and catching.
+    /// Exercises the PUBLIC one-argument `of`; the two-argument fast path
+    /// stays internal.
+    func testShiftSignatureIsRecomputableByACaller() throws {
+        let net = shifterLoop()
+        let terms = try PhaseShiftTerms.of(net)
+        XCTAssertEqual(try PhaseShiftSignature.of(net), terms.signature,
+                       "recomputing from the same network must match the terms' signature")
+        XCTAssertNotEqual(try PhaseShiftSignature.of(shifterLoop(shiftRad: 0.09)),
+                          terms.signature,
+                          "a retuned shifter must be detectable by recomputation")
+        XCTAssertEqual(try PhaseShiftSignature.of(net).factors,
+                       try FactorsSignature.of(net),
+                       "the public path must embed the same factors signature")
+    }
+
     // MARK: - Calibration for `defaultResidualTolerance` (NOT a gate)
 
     /// The measurement the shipped constant cites. Without it the constant is a

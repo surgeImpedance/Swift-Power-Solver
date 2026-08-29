@@ -20,6 +20,21 @@ public struct PhaseShiftSignature: Hashable, Sendable, CustomStringConvertible {
     public let digest: String
     public var description: String { "PhaseShiftSignature(\(digest))" }
 
+    /// Recompute the shift signature from a network, so a caller can check
+    /// whether a `PhaseShiftTerms` value is current WITHOUT calling the flow
+    /// path. **Widened internal → public 2026-08-29 (Tim's ruling):** until
+    /// then the type's "checkable by a caller" claim held only for reading
+    /// `.factors`. Publishing this commits the derivation — factors digest
+    /// seeded first, then `inService ? shiftRad : 0` per branch in index
+    /// order, doubles by bit pattern — the same commitment
+    /// `FactorsSignature.of` already made. It is a DERIVATION, not a
+    /// constructor: the memberwise init stays internal, so a caller can
+    /// obtain honest signatures and never forge one.
+    public static func of(_ net: BusBranchNetwork) throws -> PhaseShiftSignature {
+        try of(net, factors: FactorsSignature.of(net))
+    }
+
+    /// Internal fast path: reuses an already-computed factors signature.
     static func of(_ net: BusBranchNetwork,
                    factors: FactorsSignature) throws -> PhaseShiftSignature {
         var hasher = SHA256()
