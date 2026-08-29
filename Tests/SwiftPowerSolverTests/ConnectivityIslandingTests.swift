@@ -41,13 +41,11 @@ final class ConnectivityIslandingTests: XCTestCase {
         // all six (case14/39/118/300/1354/9241, 16,049 branches at case9241).
         // D2's finding therefore now covers the shipped code, and the probe is
         // gone — D3 has ONE connectivity implementation in the package.
-        // D2 established coextensivity using the PROBE. The shipped
-        // implementation is a DIFFERENT implementation by design, so D2's
-        // result does not transfer to it by assumption. If the two disagree,
-        // the probe is the only thing that says WHERE — deleting it first
-        // would throw away the diagnostic at the moment it is needed.
+        // (An earlier paragraph here argued the probe must outlive the delete;
+        // that was unit 1b's SEQUENCING rationale — compare three ways FIRST,
+        // then delete — and it read as present-tense long after the delete
+        // landed. Removed 2026-08-29; the history lives in `73c2102`.)
         let structural = NetworkConnectivity.bridgeBranches(net)   // SHIPPED
-
 
         let hHash = Self.sha(hBased.map { $0 ? 1.0 : 0.0 })
         let cHash = Self.sha(structural.map { $0 ? 1.0 : 0.0 })

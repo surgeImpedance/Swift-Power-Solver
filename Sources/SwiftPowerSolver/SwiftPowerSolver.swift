@@ -11,8 +11,13 @@
 //   1. AC Newton-Raphson power flow (`NewtonRaphsonSolver`) — polar form,
 //      PV/PQ/slack classification, generator Q-limit switching, multiple
 //      slack buses, Accelerate sparse QR each iteration.
-//   Planned: DC power flow, N-1 contingency screening, short-circuit — all
-//   consuming the same `BusBranchNetwork` and Ybus.
+//   2. DC power flow (`DCPowerFlowSolver`) — makeBdc formulation, one sparse
+//      solve, same slack/island conventions as the AC path.
+//   3. N-1 thermal contingency (`DistributionFactors`, `N1ContingencyAnalyzer`)
+//      — and, since 2026-08, PTDF/LODF/OTDF as first-class public outputs
+//      (`SensitivityEngine`, `PTDFResult`, `LODFResult`, `FactorsSignature`).
+//   4. IEC 60909 short-circuit (`ShortCircuitAnalyzer`).
+//   All consume the same `BusBranchNetwork` and Ybus.
 //
 // Fast-decoupled power flow (`FastDecoupledSolver`, XB/BX per MATPOWER makeB;
 // verified against pypower's makeB and the NR solutions) rides alongside as a

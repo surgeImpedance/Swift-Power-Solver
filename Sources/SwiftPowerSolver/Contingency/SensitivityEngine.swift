@@ -25,6 +25,17 @@ public struct SensitivityEngine: Sendable {
 
     // MARK: - PTDF
 
+    /// Injection-shift factors `∂F_branch/∂P_bus` for `net`, keyed by the
+    /// network's `FactorsSignature` and screened by control 2 (the residual
+    /// guard) when `residualTolerance` is non-nil.
+    ///
+    /// Throws `.singularAdmittanceMatrix(worstResidual:)` when the solve is
+    /// numerically hollow (a rank-deficient network that Accelerate's QR
+    /// "solves" — D65), and the reference-scheme errors from `classify`.
+    /// The result is PURE sensitivity: for a complete DC flow on a
+    /// shifter-bearing network, pair it with `PhaseShiftTerms.of(_:)` via
+    /// `PTDFResult.completeDCBranchFlows` — the shift terms deliberately do
+    /// not live here (C1).
     public func ptdf(_ net: BusBranchNetwork,
                      slack: SlackReference = .networkDefined) throws -> PTDFResult {
         let signature = try FactorsSignature.of(net)
@@ -81,6 +92,17 @@ public struct SensitivityEngine: Sendable {
 
     // MARK: - LODF
 
+    /// Line-outage distribution factors for `net`, carrying D1's three
+    /// controls: structural islanding (`isOutageIslanding`, branchable and
+    /// non-throwing), the throwing accessors (`.islandingOutage` on an
+    /// islanding column), and the unthresholded `conditioning(outaging:)`
+    /// annotation.
+    ///
+    /// Pass `from:` to reuse an already-built PTDF; its signature is
+    /// validated against `net` first (`.signatureMismatch` on disagreement).
+    /// Only a `.networkDefined`-slack PTDF carries reusable base factors — a
+    /// post-shifted (`.dense`) result is validated but the factors are
+    /// rebuilt.
     public func lodf(_ net: BusBranchNetwork,
                      from ptdf: PTDFResult? = nil) throws -> LODFResult {
         let signature = try FactorsSignature.of(net)

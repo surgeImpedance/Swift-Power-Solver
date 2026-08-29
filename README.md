@@ -55,7 +55,10 @@ extracted from a substation simulator that does exactly that.)
   outage, and violations against branch thermal ratings. Outages that
   disconnect the network are classified as islanding rather than producing the
   `inf`/`nan` that the textbook formula yields there. Results are structured
-  data (flows, loadings, outcomes) for the application to render.
+  data (flows, loadings, outcomes) for the application to render. Since
+  2026-08 the factors are also **first-class, queryable outputs** —
+  `SensitivityEngine` / `PTDFResult` / `LODFResult`, see
+  [Sensitivity factors](#sensitivity-factors-ptdflodfotdf) below.
 - **Piece 4 — IEC 60909 short-circuit** (`ShortCircuitAnalyzer`): standardized
   bus-fault currents — `Ik''` (initial symmetrical), `Skss`, `ip` (peak, via
   the IEC method-C κ factor), and `Ith` (thermal), from the positive-sequence
@@ -197,11 +200,13 @@ if solution.converged {
 }
 ```
 
-N-1 thermal screening runs off a DC base solution:
+N-1 thermal screening runs off a DC base solution. `screen` throws — the
+residual control refuses a numerically hollow solve rather than returning a
+plausible all-clear (`SensitivityError.singularAdmittanceMatrix`):
 
 ```swift
 let base = DCPowerFlowSolver().solve(network)
-let screening = N1ContingencyAnalyzer().screen(network, base: base)
+let screening = try N1ContingencyAnalyzer().screen(network, base: base)
 
 for result in screening.casesWithViolations {
     print("outage", result.outagedBranch)
@@ -213,6 +218,43 @@ for result in screening.casesWithViolations {
 // Outages that split the network are reported, not silently wrong:
 let islanding = screening.cases.filter { $0.outcome == .islandsNetwork }
 ```
+
+### Sensitivity factors (PTDF/LODF/OTDF)
+
+The factors behind the screen are a public, queryable surface of their own
+(`Sources/SwiftPowerSolver/Contingency/`):
+
+```swift
+let engine = SensitivityEngine()                  // residual guard ON (1e-6)
+let ptdf = try engine.ptdf(network)               // ∂F/∂P, signature-keyed
+let sens = try ptdf[BranchID(4), BusID(17)]       // one factor
+let lodf = try engine.lodf(network, from: ptdf)   // reuses the build
+
+if lodf.isOutageIslanding(BranchID(2)) { /* branchable, non-throwing */ }
+let redistribution = try lodf[BranchID(0), BranchID(7)]
+let kappa = try lodf.conditioning(outaging: BranchID(7))  // annotation only
+
+// Complete DC flow needs the phase-shift terms — a separate, cheap value
+// with its own superset signature, so a shifter retune can never serve
+// stale flows from a signature-keyed cache:
+let shift = try PhaseShiftTerms.of(network)
+let flows = try ptdf.completeDCBranchFlows(
+    injections: [BusID(17): 1.0], phaseShift: shift, network: network)
+```
+
+- **Identity:** `FactorsSignature.of(network)` — SHA-256 over exactly what
+  the factors consume (`bSeries`, branch endpoints, bus classification);
+  `shiftRad` is deliberately excluded. `PhaseShiftTerms.signature` embeds it
+  as a strict superset. Both are the intended cache keys; **no cache ships
+  in this package.**
+- **Failure surface:** `SensitivityError` — `.signatureMismatch` /
+  `.shiftSignatureMismatch` (stale object vs live network),
+  `.islandingOutage`, `.singularAdmittanceMatrix(worstResidual:)` (control 2;
+  disable with `SensitivityEngine(residualTolerance: nil)`), and the input
+  validation cases.
+- **Islanding is structural** (bridge-finding via `NetworkConnectivity`),
+  never a numerical threshold; `conditioning` is exposed and deliberately
+  unthresholded.
 
 IEC 60909 short-circuit needs fault-current sources — generators carrying a
 subtransient impedance. `scSubtransientRPu` / `scSubtransientXPu` are how a
