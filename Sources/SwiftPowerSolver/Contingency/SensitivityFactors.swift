@@ -94,6 +94,16 @@ public enum SensitivityError: Error, Equatable, Sendable {
     case unknownBus(BusID)
     case unknownBranch(BranchID)
     case signatureMismatch(expected: FactorsSignature, actual: FactorsSignature)
+    /// The FACTORS matched but the SHIFT TERMS are stale — thrown by
+    /// `completeDCBranchFlows` when `phaseShift.signature` disagrees with the
+    /// network's live `PhaseShiftSignature`. Distinct from `.signatureMismatch`
+    /// because the repairs differ by six orders of magnitude: stale factors
+    /// need a rebuild (seconds at scale), stale shift terms need only
+    /// `PhaseShiftTerms.of(_:)` (microseconds). Until 2026-08-29 this branch
+    /// threw `.signatureMismatch` carrying two IDENTICAL factors signatures —
+    /// the check fired, and the diagnostic pointed at the wrong repair on
+    /// exactly the shifter-bearing networks C1 exists to defend.
+    case shiftSignatureMismatch(expected: PhaseShiftSignature, actual: PhaseShiftSignature)
     case islandingOutage(BranchID)
     case singularAdmittanceMatrix(worstResidual: Double?)
     case disconnectedNetwork

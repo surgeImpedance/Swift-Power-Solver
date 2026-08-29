@@ -209,7 +209,8 @@ public struct PTDFResult: Sendable {
         }
         let shiftSig = try PhaseShiftSignature.of(network, factors: live)
         guard shiftSig == phaseShift.signature else {
-            throw SensitivityError.signatureMismatch(expected: signature, actual: live)
+            throw SensitivityError.shiftSignatureMismatch(expected: phaseShift.signature,
+                                                          actual: shiftSig)
         }
         var p = [Double](repeating: 0, count: busCount)
         for (bus, v) in injections {

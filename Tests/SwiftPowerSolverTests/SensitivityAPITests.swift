@@ -76,6 +76,54 @@ final class SensitivityAPITests: XCTestCase {
              + "s0=\(s0.digest.prefix(12))  x->both moved  shift->only shift moved")
     }
 
+    /// The two mismatch branches of `completeDCBranchFlows` throw DIFFERENT
+    /// errors carrying the SIGNATURES THAT ACTUALLY DISAGREE. This asserts the
+    /// diagnostic CONTENT, not merely that something threw: until 2026-08-29
+    /// the shift branch threw `.signatureMismatch(expected:actual:)` with two
+    /// IDENTICAL factors signatures — line 207 had already proved them equal —
+    /// so the check fired and the message pointed at the wrong repair on
+    /// exactly the shifter-bearing networks C1 defends.
+    func testMismatchDiagnosticsNameTheSignaturesThatDisagree() throws {
+        let net = shifterLoop()
+        XCTAssertEqual(net.branches.filter { $0.shiftRad != 0 }.count, 1,
+                       "fixture must carry a phase shifter")
+        let ptdf = try SensitivityEngine().ptdf(net)
+        let terms = try PhaseShiftTerms.of(net)
+        let inj: [BusID: Double] = [BusID(1): -0.4, BusID(2): -0.3, BusID(3): -0.2]
+
+        // Same network: both signatures validate and flows come back.
+        XCTAssertNoThrow(try ptdf.completeDCBranchFlows(
+            injections: inj, phaseShift: terms, network: net))
+
+        // Retune ONLY the shifter: factors stay valid, the terms are stale.
+        let retuned = shifterLoop(shiftRad: 0.09)
+        XCTAssertThrowsError(try ptdf.completeDCBranchFlows(
+            injections: inj, phaseShift: terms, network: retuned)) { err in
+            guard case let SensitivityError.shiftSignatureMismatch(expected, actual) = err else {
+                return XCTFail("expected .shiftSignatureMismatch, got \(err)")
+            }
+            XCTAssertEqual(expected, terms.signature,
+                           "`expected` must be the STALE terms' signature")
+            XCTAssertNotEqual(expected, actual,
+                              "the diagnostic must carry a DISAGREEING pair")
+            XCTAssertEqual(expected.factors, actual.factors,
+                           "factors agree here — which is what makes this the shift branch")
+        }
+
+        // Move a reactance instead: the FACTORS branch fires, with ITS pair.
+        let xMoved = shifterLoop(x: 0.20)
+        XCTAssertThrowsError(try ptdf.completeDCBranchFlows(
+            injections: inj, phaseShift: terms, network: xMoved)) { err in
+            guard case let SensitivityError.signatureMismatch(expected, actual) = err else {
+                return XCTFail("expected .signatureMismatch, got \(err)")
+            }
+            XCTAssertEqual(expected, ptdf.signature,
+                           "`expected` must be the stale PTDF's signature")
+            XCTAssertNotEqual(expected, actual,
+                              "the factors diagnostic must also carry a disagreeing pair")
+        }
+    }
+
     // MARK: - Calibration for `defaultResidualTolerance` (NOT a gate)
 
     /// The measurement the shipped constant cites. Without it the constant is a
