@@ -4,13 +4,13 @@ import XCTest
 @testable import SwiftPowerSolver
 
 /// D2: does connectivity-based islanding agree with the `h`-based
-/// classification the goldens pin?
-///
-/// This runs BEFORE any classification code changes, because
-/// `FactorsIdentityTests` pins the islanding vector by hash
-/// (case300 `69fc9f47c69e7f0a`, and the case1354 / case9241 equivalents). If
-/// connectivity disagrees anywhere, the golden pins a MISCLASSIFICATION and has
-/// since `4da8e44` — a finding, not an obstacle.
+/// classification? Since D73's closure (2026-08-29) the SHIPPED classifier is
+/// structural — `FactorsIdentityTests`' islanding hashes pin the structural
+/// vector now, and they held BITWISE across the switch because the two
+/// methods agree on every corpus branch. The h-based side of this comparison
+/// is a local REFERENCE implementation of the retired rule, kept so the
+/// ratcheted `differing` counts keep measuring where the two methods part on
+/// real data (the C2 regime), rather than comparing one array to itself.
 ///
 /// D42 measured coextensivity app-side on 135 branches. The pegase cases carry
 /// 16,049 branches and a far wider reactance spread, which is exactly where the
@@ -48,7 +48,20 @@ final class ConnectivityIslandingTests: XCTestCase {
     private func compare(_ name: String, _ net: BusBranchNetwork) -> Int {
         let factors = DistributionFactors.build(net)
         let nbr = net.branches.count
-        let hBased = (0..<nbr).map { factors.isIslanding(outage: $0) }
+        // Since D73's closure (2026-08-29) `factors.isIslanding` IS the
+        // structural array, so comparing it to `bridgeBranches` would be a
+        // tautology — the same computation twice. The h-based side is
+        // therefore computed HERE as a REFERENCE implementation (the exact
+        // pre-D73 rule: in service, |1 − h| < 1e-9), which keeps this
+        // comparison's subject — where the h-method and structure part on
+        // real data — and keeps the ratchet a control rather than a mirror.
+        let hBased = (0..<nbr).map { k -> Bool in
+            let br = net.branches[k]
+            guard br.inService, br.from != br.to, br.x != 0 else { return false }
+            let h = factors.ptdf(branch: k, bus: br.from)
+                  - factors.ptdf(branch: k, bus: br.to)
+            return abs(1 - h) < 1e-9
+        }
         // GATE 6.16 — the SHIPPED connectivity, not a probe (M1/D3).
         //
         // D2 established coextensivity using a probe Tarjan in this file. That

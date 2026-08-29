@@ -227,6 +227,10 @@ The factors behind the screen are a public, queryable surface of their own
 ```swift
 let engine = SensitivityEngine()                  // residual guard ON (1e-6)
 let ptdf = try engine.ptdf(network)               // ∂F/∂P, signature-keyed
+// Cancellable form, same guard on the same core — nil means CANCELLED:
+// try engine.ptdf(network, isCancelled: { Task.isCancelled })
+// A consumer can recompute the shift signature to check terms for currency:
+// try PhaseShiftSignature.of(network) == terms.signature
 let sens = try ptdf[BranchID(4), BusID(17)]       // one factor
 let lodf = try engine.lodf(network, from: ptdf)   // reuses the build
 

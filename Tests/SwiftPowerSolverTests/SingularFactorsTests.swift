@@ -119,13 +119,17 @@ final class SingularFactorsTests: XCTestCase {
              + "islanding = \(islanding)  anyNonFinite = \(anyNonFinite)")
 
         // BOTH branches are bridges — each is the only path in its island — so
-        // a correct build classifies both as islanding. Branch 1 is not, and
-        // that misclassification is produced by the garbage solve.
+        // a correct build classifies both as islanding. Until 2026-08-29 this
+        // pinned the DEFECT: the h-based test read branch 1 off the garbage
+        // least-squares solve as a healthy meshed branch, and the assertion
+        // below was `XCTAssertFalse` with "D65's fix inverts this assertion"
+        // in its message. D73's closure is what finally inverted it —
+        // classification keys on `bridgeBranches`, which cannot be fooled by
+        // a numerically hollow solve, because it never consults the solve.
         XCTAssertTrue(islanding[0], "branch 0 is a bridge")
-        XCTAssertFalse(islanding[1],
-            "PINS TODAY'S DEFECT: branch 1 is also a bridge, but the "
-            + "least-squares solve makes it look like a healthy meshed branch. "
-            + "D65's fix inverts this assertion.")
+        XCTAssertTrue(islanding[1],
+            "branch 1 is a bridge and must classify as islanding regardless "
+            + "of what the garbage solve produced — INVERTED at D73's closure")
         XCTAssertFalse(anyNonFinite, "no inf/nan reaches the public accessors")
     }
 
@@ -316,14 +320,18 @@ final class SingularFactorsTests: XCTestCase {
             x *= pow(10, 0.5)
         }
 
-        if let g = lastGood, let b = firstBad {
-            note(String(format: "D65 ONSET: last correct  xTie=%.2e residual=%.6e |1-h|=%.6e",
-                        g.x, g.residual, g.h))
-            note(String(format: "D65 ONSET: first WRONG   xTie=%.2e residual=%.6e |1-h|=%.6e",
-                        b.x, b.residual, b.h))
-            note(String(format: "D65 ONSET: worst healthy at scale = 9.734435e-13 (case9241); "
-                        + "margin to first wrong residual = %.1f x", b.residual / 9.734435e-13))
-        }
-        XCTAssertNotNil(firstBad, "the sweep never reached a misclassification")
+        // INVERTED at D73's closure (2026-08-29). This sweep originally
+        // LOCATED the h-based misclassification onset (last correct
+        // xTie=1.00e5 at |1-h|=7.551e-13; first wrong xTie=3.16e5 at
+        // |1-h|=1.270e-09 — the record lives in D65 §4) and asserted the
+        // onset EXISTED. With classification structural, the onset is GONE by
+        // construction: the tie is a bridge at every reactance, and no
+        // numerical error in `h` can flip a verdict that never reads `h`.
+        // The sweep stays as the standing witness of exactly that.
+        XCTAssertNil(firstBad,
+            "structural classification must be correct at EVERY tie reactance "
+            + "— a misclassification here means someone rebuilt a threshold "
+            + "on `h` (the control D65 §4 removed)")
+        XCTAssertNotNil(lastGood, "the sweep must have classified something")
     }
 }

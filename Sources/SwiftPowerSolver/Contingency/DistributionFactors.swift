@@ -29,9 +29,11 @@ import os
 // arithmetic, and the bit-identity gate is the check that proves it.
 public struct DistributionFactors: Sendable {
 
-    /// Below this, the LODF denominator (1 − h_k) counts as zero: outaging k
-    /// disconnects the network, so no finite redistribution factor exists.
-    static let islandingEpsilon = 1e-9
+    // `islandingEpsilon` (1e-9, the h-based classification threshold) was
+    // REMOVED 2026-08-29 when D73 closed: classification AND column-zeroing
+    // both key on `NetworkConnectivity.bridgeBranches` now — structural,
+    // exact, threshold-free — so no scalar epsilon exists to tune, and the
+    // C2 regime where |1 − h| error crossed it cannot flip a verdict.
 
     public let busCount: Int
     public let branchCount: Int
@@ -54,7 +56,10 @@ public struct DistributionFactors: Sendable {
     }
 
     /// True when outaging branch `k` splits the network, making LODF for that
-    /// outage undefined (1 − h_k → 0).
+    /// outage undefined. STRUCTURAL since 2026-08-29 (D73 closed): the array
+    /// is `NetworkConnectivity.bridgeBranches`, the same classification
+    /// `LODFResult` has carried since D65 §4 — not a threshold on `1 − h_k`,
+    /// which this accessor keyed on until then.
     ///
     /// NOTE — deliberate divergence from pandapower: pypower's `makeLODF`
     /// divides by zero here and returns a column of `inf`/`nan`. We classify
@@ -182,16 +187,26 @@ public struct DistributionFactors: Sendable {
         var islanding = [Bool](repeating: false, count: nbr)
         struct Outage { var f = 0; var t = 0; var den = 0.0; var active = false }
         var outages = [Outage](repeating: Outage(), count: nbr)
+        // D73 CLOSED 2026-08-29: classification and column-zeroing key on the
+        // SAME structural array. Until then the zeroing keyed on the h-based
+        // `|1 − h| < 1e-9` test while `LODFResult`'s verdicts were structural,
+        // so a divergent branch would have served a zeroed column through a
+        // non-throwing path. Zero corpus divergence (18,703 branches) is what
+        // lets the goldens hold BITWISE across this change — the identity
+        // gate witnesses it.
+        let bridges = NetworkConnectivity.bridgeBranches(net, live: live)
         for (k, branch) in net.branches.enumerated() {
             guard bSeries[k] != 0 else { continue }         // out of service / dead
             let f = branch.from, t = branch.to
             let h = ptdf[k * n + f] - ptdf[k * n + t]
-            let den = 1 - h
-            if abs(den) < islandingEpsilon {
+            if bridges[k] {
                 islanding[k] = true                          // column stays zero
                 continue
             }
-            outages[k] = Outage(f: f, t: t, den: den, active: true)
+            // Non-bridge: the denominator is used as-is, however small — a
+            // weakly-coupled real branch gets a large-but-finite column
+            // (accepted-degraded, D65 §4), never a silent zero.
+            outages[k] = Outage(f: f, t: t, den: 1 - h, active: true)
         }
         lodf.withUnsafeMutableBufferPointer { lp in
             let lBase = lp.baseAddress!
