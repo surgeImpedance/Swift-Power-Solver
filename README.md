@@ -355,7 +355,7 @@ clone runs all of them:
 | `FootprintTests.testCase9241FactorsFootprint` | residency at 9,241 buses |
 | `NearBridgeAccuracyTests.testAtScale` | near-bridge accuracy at scale |
 | `SensitivityAPITests.testUnit2_enginePathFootprintAtScale` | engine-path residency |
-| `SingularFactorsTests.testHealthyResidualAtScale` | the healthy-residual control |
+| `SingularFactorsTests.testMeasureColumnResidualAtScale` | column-residual **measurement** at scale (a superseded quantity — the shipped 1e-6 guard is calibrated by `SensitivityAPITests.testResidualCalibration` and by nothing else) |
 
 `SPS_FACTORS_CASES` (comma-separated paths) **overrides** the committed
 copies, unchanged semantics. If it is unset *and* the committed copies are

@@ -130,6 +130,13 @@ final class SensitivityAPITests: XCTestCase {
     /// ghost. This is calibration, not gate 6.x — it reports a spread and
     /// asserts only that the healthy maximum sits far below the shipped
     /// tolerance and the singular case far above it.
+    ///
+    /// **SOLE CARRIER (2026-08-29): the shipped 1e-6 rests on this test and
+    /// on nothing else.** It is the only place the NODAL-BALANCE quantity the
+    /// guard actually enforces is asserted against the tolerance in both
+    /// directions. `SingularFactorsTests`' residual measurements are the
+    /// SUPERSEDED column quantity (`‖B_red·x − e‖∞`) and back no shipped
+    /// threshold — see `testMeasureColumnResidualAtScale`.
     func testResidualCalibration() throws {
         var rows: [(String, Double)] = []
         for name in ["case14", "case39", "case118"] {

@@ -39,9 +39,14 @@ final class SingularFactorsTests: XCTestCase {
             generators: [.init(bus: 0, pPu: 1.0, vSetPu: 1.0)])
     }
 
-    /// `max_c ||B_red·x_c − e_c||inf` over every solved column — the control
-    /// D65 §3 rules is the real one, because it sees both the nil path and the
-    /// rank-deficient-success path. nil when the solve itself reported failure.
+    /// `max_c ||B_red·x_c − e_c||inf` over every solved column — the quantity
+    /// D65 §3 ORIGINALLY ruled as the control (it sees both the nil path and
+    /// the rank-deficient-success path). SUPERSEDED at Q2: the shipped guard
+    /// measures NODAL BALANCE (`SensitivityEngine.nodalBalanceResidual`),
+    /// because this quantity needs the solved inverse, which the frozen type
+    /// does not expose. This helper stays as the test-side MEASUREMENT
+    /// instrument behind D65's historical spread; it backs no shipped
+    /// threshold. nil when the solve itself reported failure.
     static func worstColumnResidual(_ net: BusBranchNetwork) -> Double? {
         let live = net.buses.map { $0.type != .isolated }
         let isSlack = net.buses.map { $0.type == .slack }
@@ -239,12 +244,22 @@ final class SingularFactorsTests: XCTestCase {
         XCTAssertFalse(residuals.isEmpty, "the sweep measured nothing")
     }
 
-    /// The scale measurement D65 §0 deferred, now decision-relevant: C2 showed
-    /// the first islanding MISCLASSIFICATION appears around a residual of
-    /// 3.7e-9. A scalar threshold can only be the control if healthy networks
-    /// AT SCALE stay well below that. Reads the same fixtures as
-    /// FactorsIdentityTests.
-    func testHealthyResidualAtScale() throws {
+    /// MEASUREMENT, not a control — and of a SUPERSEDED quantity. This
+    /// measures `‖B_red·x − e‖∞`, the column residual D65 §0/§4 derived the
+    /// original threshold from; Q2 replaced that instrument with NODAL
+    /// BALANCE in the shipped guard, so nothing this test measures is what
+    /// `SensitivityEngine` checks. It asserts nothing about its subject and
+    /// cannot fail on it; its value is the historical record (the scale
+    /// spread that located the threshold decision).
+    ///
+    /// **The shipped 1e-6 calibration rests on
+    /// `SensitivityAPITests.testResidualCalibration` and on NOTHING ELSE.**
+    /// That test measures the nodal-balance quantity the guard actually
+    /// enforces, and asserts both directions (healthy far below, singular
+    /// far above). Renamed from `testHealthyResidualAtScale` 2026-08-29 —
+    /// the old name plus the README's "control" label asserted coverage of
+    /// the shipped guard that this test never had.
+    func testMeasureColumnResidualAtScale() throws {
         let paths = FactorsIdentityTests.factorsCasePaths()
         guard !paths.isEmpty else {
             XCTFail("No scale fixtures (env unset AND committed copies missing) "
