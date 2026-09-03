@@ -538,7 +538,10 @@ public struct FastDecoupledSolver: PowerFlowSolver {
             solutionPath: .fdpf,
             stages: [SolveStage(kind: .fdpf, iterations: state.rounds,
                                 converged: true,
-                                finalMismatchPu: state.finalMismatchPu)])
+                                finalMismatchPu: state.finalMismatchPu)],
+            // D80: consumed ≡ scheduled until a solver evaluates ZIP.
+            loadPPu: net.buses.map(\.pLoadPu),
+            loadQPu: net.buses.map(\.qLoadPu))
     }
 
     private func failed(_ net: BusBranchNetwork, reason: String,

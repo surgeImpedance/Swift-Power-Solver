@@ -109,6 +109,14 @@ final class FallbackEconomyTests: XCTestCase {
         let net = try ReferenceCase.load("case14").network()
         let a = TimeSeriesSweep().run(base: net, steps: steps(net), options: options())
         let b = TimeSeriesSweep().run(base: net, steps: steps(net), options: options())
+        // PREMISE, asserted (2026-09-02): the ×5 plateau must actually fail, or
+        // the NaN-carrying path this test exists to pin is never exercised and
+        // every assertion below passes vacuously. Its siblings in this file
+        // assert the premise; this one did not — it was the one silently-green
+        // member of the infeasibility-premised set (ZIP exploration §7.1).
+        XCTAssertFalse(a[2].converged, "premise: the ×5 plateau step must fail")
+        XCTAssertTrue(a[2].vmPu.contains { $0.isNaN },
+                      "premise: a failed step carries NaN voltages")
         for (x, y) in zip(a, b) {
             XCTAssertEqual(x.converged, y.converged)
             // Bit patterns, not ==: failed steps carry NaN voltages, and

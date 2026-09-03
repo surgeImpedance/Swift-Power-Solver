@@ -120,6 +120,16 @@ public struct PowerFlowSolution: Sendable {
     /// check found no violations (`enforceQLimits` off always reports 0).
     /// Direct evidence of how much of `iterations` is PV→PQ restart cost.
     public var qLimitRestarts: Int = 0
+    /// Load CONSUMED per bus at the solved voltage, pu, parallel to
+    /// `network.buses` (D80; ZIP exploration §3.5, §6.5). Until a solver
+    /// evaluates a voltage-dependent load this is exactly `pLoadPu`/`qLoadPu`
+    /// — the scheduled value, which under constant power IS the consumed
+    /// value. The field exists now because no solution type in the product
+    /// carried a consumed-load figure at all, so there was nowhere to put a
+    /// correct one the moment schedule stops equalling consumption. Empty on
+    /// a failed solve.
+    public var loadPPu: [Double] = []
+    public var loadQPu: [Double] = []
 }
 
 public protocol PowerFlowSolver {

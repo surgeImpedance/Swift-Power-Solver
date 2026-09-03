@@ -417,7 +417,10 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             genPPu: genP, genQPu: genQ, pinnedGenIndices: pinnedGens,
             pLimitedGenIndices: pPinnedGens,
             pSaturatedGenIndices: pSaturatedGens,
-            qLimitRestarts: qLimitRestartCount)
+            qLimitRestarts: qLimitRestartCount,
+            // D80: consumed ≡ scheduled until a solver evaluates ZIP.
+            loadPPu: net.buses.map(\.pLoadPu),
+            loadQPu: net.buses.map(\.qLoadPu))
     }
 
     // MARK: - Inner Newton iteration

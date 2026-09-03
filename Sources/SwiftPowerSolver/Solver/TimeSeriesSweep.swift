@@ -20,7 +20,20 @@ public struct LoadStep: Sendable, Equatable {
     public struct BusLoad: Sendable, Equatable {
         public var pPu: Double
         public var qPu: Double
-        public init(pPu: Double, qPu: Double) { self.pPu = pPu; self.qPu = qPu }
+        /// D80: the step's absolute Z / I components of `pPu` / `qPu`, pu at
+        /// V = 1 (see `Bus.pLoadZPu`). Default 0 — every pre-D80 caller passes
+        /// a constant-power step, bit-identically.
+        public var pZPu: Double = 0
+        public var pIPu: Double = 0
+        public var qZPu: Double = 0
+        public var qIPu: Double = 0
+        public init(pPu: Double, qPu: Double,
+                    pZPu: Double = 0, pIPu: Double = 0,
+                    qZPu: Double = 0, qIPu: Double = 0) {
+            self.pPu = pPu; self.qPu = qPu
+            self.pZPu = pZPu; self.pIPu = pIPu
+            self.qZPu = qZPu; self.qIPu = qIPu
+        }
     }
 
     /// Absolute per-bus shunt admittance for a step (switched reactive
@@ -203,6 +216,14 @@ public struct TimeSeriesSweep {
         for (bus, load) in step.busLoads where bus >= 0 && bus < net.buses.count {
             net.buses[bus].pLoadPu = load.pPu
             net.buses[bus].qLoadPu = load.qPu
+            // D80: the step carries its own absolute Z/I components, exactly
+            // as it carries its absolute total — a scaled hour scales the
+            // components with the schedule. Zero on every pre-D80 step, which
+            // writes 0 over 0 and is bit-neutral.
+            net.buses[bus].pLoadZPu = load.pZPu
+            net.buses[bus].pLoadIPu = load.pIPu
+            net.buses[bus].qLoadZPu = load.qZPu
+            net.buses[bus].qLoadIPu = load.qIPu
         }
         for (g, p) in step.genPOverridesPu where g >= 0 && g < net.generators.count {
             net.generators[g].pPu = p

@@ -133,7 +133,10 @@ public struct DCPowerFlowSolver: PowerFlowSolver {
         return PowerFlowSolution(
             converged: true, failureReason: nil, iterations: 1,
             vmPu: vmOut, vaRad: vaOut, branchFlows: flows,
-            genPPu: genP, genQPu: genQ, pinnedGenIndices: [])
+            genPPu: genP, genQPu: genQ, pinnedGenIndices: [],
+            // D80: DC holds V ≡ 1, so consumed is the V = 1 value by definition.
+            loadPPu: net.buses.map(\.pLoadPu),
+            loadQPu: net.buses.map(\.qLoadPu))
     }
 
     private func failed(_ net: BusBranchNetwork, reason: String) -> PowerFlowSolution {
