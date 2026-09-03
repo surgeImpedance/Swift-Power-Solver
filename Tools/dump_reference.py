@@ -969,5 +969,109 @@ def main() -> None:
           f"-> {pl_out.relative_to(HERE.parent)}")
 
 
+# ---------------------------------------------------------------------------
+# D80 step 3 — the ZIP (voltage-dependent load) oracle.
+#
+# AN ADDITIVE FILE (`Reference/zip.json`), never a re-emission of
+# case14/39/118.json: those bytes are on the critical path of four gates
+# (D68 §3), so the ZIP blocks live beside them. Run as
+#     python Tools/dump_reference.py zip
+#
+# Two known asymmetries between the reference tools, measured 2026-09-02
+# (substation-lab docs/investigations/zip-oracle-control.md):
+#   * pandapower re-evaluates the load each iteration but its Jacobian has no
+#     load term (pf/create_jacobian.py: Ibus = zeros), so its ITERATION COUNT
+#     is a partial-Newton count (8/13/8 here vs MATPOWER's full-Newton 4/5/5).
+#     `iterations` is recorded as provenance and must never be a gate.
+#   * pandapower count-averages the coefficients of several loads on one bus
+#     (build_bus.py); the mix below is applied UNIFORMLY and one-load-per-bus
+#     is asserted, so the bus polynomial is exact either way.
+# Converged voltages agree with MATPOWER 8.0 on identical data to ≤ 1e-11 pu
+# (case14/39) and to the constant-power export residual on case118.
+# ---------------------------------------------------------------------------
+
+# Fractions of P0 / Q0 at V = 1 pu. P = 0.3 Z + 0.3 I + 0.4 P; Q = 0.5 Z + 0.3 I + 0.2 Q.
+ZIP_MIX = {"z_p": 0.3, "i_p": 0.3, "z_q": 0.5, "i_q": 0.3}
+
+# Pinned. `max_iteration=60` is REQUIRED for the ZIP runs: pandapower's
+# partial Newton needs 13 iterations on case39, above its default of 10.
+ZIP_OPTIONS = dict(algorithm="nr", init="flat", tolerance_mva=1e-10, max_iteration=60,
+                   calculate_voltage_angles=True, voltage_depend_loads=True)
+
+
+def _apply_zip(net) -> None:
+    assert net.load.bus.value_counts().max() == 1, (
+        "one load per bus is the fixture rule: pandapower count-averages the "
+        "coefficients of several loads on one bus (build_bus.py)")
+    net.load["const_z_p_percent"] = 100.0 * ZIP_MIX["z_p"]
+    net.load["const_i_p_percent"] = 100.0 * ZIP_MIX["i_p"]
+    net.load["const_z_q_percent"] = 100.0 * ZIP_MIX["z_q"]
+    net.load["const_i_q_percent"] = 100.0 * ZIP_MIX["i_q"]
+
+
+def _consumed_load(net) -> dict:
+    """pandapower's own consumed load at the solved voltage (res_load), keyed
+    by ppc bus index — the oracle for `PowerFlowSolution.loadPPu`."""
+    lookup = net._pd2ppc_lookups["bus"]
+    return {
+        "bus": [int(lookup[b]) for b in net.load.bus],
+        "p_mw": [float(v) for v in net.res_load.p_mw],
+        "q_mvar": [float(v) for v in net.res_load.q_mvar],
+        "scheduled_p_mw": [float(v) for v in net.load.p_mw],
+        "scheduled_q_mvar": [float(v) for v in net.load.q_mvar],
+    }
+
+
+def dump_zip_reference() -> dict:
+    doc = {
+        "pandapower_version": pp.__version__,
+        "coefficients": {**ZIP_MIX,
+                         "p_p": 1.0 - ZIP_MIX["z_p"] - ZIP_MIX["i_p"],
+                         "q_q": 1.0 - ZIP_MIX["z_q"] - ZIP_MIX["i_q"],
+                         "applied_as": "uniform const_{z,i}_{p,q}_percent on every load; "
+                                       "one load per bus asserted"},
+        "options": {k: v for k, v in ZIP_OPTIONS.items()},
+        "cases": {},
+    }
+    for name, make_net in CASES.items():
+        entry = {"constant_power": {}, "zip": {}, "max_abs_dvm_zip_minus_constant_power": {}}
+        for q in (False, True):
+            key = "q_lims" if q else "default"
+            # Constant-power control: EXACTLY the committed dump's call, so the
+            # Swift loader can assert this block equals the committed fixture
+            # (the regeneration control) — a drift in options shows up as a
+            # moved control, not as a moved ZIP answer.
+            net = make_net()
+            pp.runpp(net, enforce_q_lims=q, calculate_voltage_angles=True,
+                     init="flat", tolerance_mva=1e-10)
+            _check_ppc_is_identity_mapped(net)
+            entry["constant_power"][key] = dump_solution(net)
+
+            netz = make_net()
+            _apply_zip(netz)
+            pp.runpp(netz, enforce_q_lims=q, **ZIP_OPTIONS)
+            _check_ppc_is_identity_mapped(netz)
+            sol = dump_solution(netz)
+            sol["consumed_load"] = _consumed_load(netz)
+            entry["zip"][key] = sol
+
+            # Anti-vacuity at generation time (the Swift loader asserts it
+            # again): a ZIP fixture indistinguishable from constant power is
+            # a fixture of the container, not the content.
+            dv = max(abs(a - b) for a, b in
+                     zip(entry["constant_power"][key]["vm_pu"], sol["vm_pu"]))
+            entry["max_abs_dvm_zip_minus_constant_power"][key] = dv
+            assert dv > 1e-6, f"{name}/{key}: ZIP == constant power ({dv:.3e}); vacuous"
+            print(f"zip {name}/{key}: constant-power it={entry['constant_power'][key]['iterations']} "
+                  f"zip it={sol['iterations']} max|dVm|={dv:.3e} pu")
+        doc["cases"][name] = entry
+    return doc
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "zip":
+        out = OUT_DIR / "zip.json"
+        out.write_text(json.dumps(dump_zip_reference(), indent=1))
+        print(f"-> {out}")
+        sys.exit(0)
     sys.exit(main())
