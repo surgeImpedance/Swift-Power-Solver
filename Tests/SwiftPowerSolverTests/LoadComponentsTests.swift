@@ -72,39 +72,41 @@ final class LoadComponentsTests: XCTestCase {
         XCTAssertTrue(failed.loadPPu.isEmpty && failed.loadQPu.isEmpty)
     }
 
-    // MARK: - Inertness: nonzero components change NOTHING in any solver
+    // MARK: - Step 4b RE-PREMISED (2026-09-03): the AC solvers now READ the
+    // components, so a nonzero mix changes the answer on every AC solver (and
+    // the oracle agreement lives in `ZIPSolveTests`). What is still asserted
+    // bit-for-bit here: DC ignores them by construction, and the
+    // constant-power path — the flag false — is the unchanged code, witnessed
+    // by every constant-power fixture gate staying green.
 
-    func testComponentsAreInertOnEverySolver() throws {
+    func testComponentsChangeTheAnswerOnEveryACSolverAndNotOnDC() throws {
         for name in ["case14", "case39", "case118"] {
             let net = try ReferenceCase.load(name).network()
             let z = withComponents(net)
             XCTAssertTrue(z.hasVoltageDependentLoad, name)
-
+            func moved(_ a: PowerFlowSolution, _ b: PowerFlowSolution) -> Double {
+                zip(a.vmPu, b.vmPu).map { abs($0 - $1) }.max() ?? 0
+            }
             for qlims in [false, true] {
                 let a = NewtonRaphsonSolver().solve(net, options: PowerFlowOptions(tolerancePu: 1e-12, enforceQLimits: qlims))
                 let b = NewtonRaphsonSolver().solve(z, options: PowerFlowOptions(tolerancePu: 1e-12, enforceQLimits: qlims))
-                assertBitIdentical(a, b, "\(name) NR qlims=\(qlims)")
+                XCTAssertTrue(a.converged && b.converged, name)
+                XCTAssertGreaterThan(moved(a, b), 1e-6, "\(name) NR qlims=\(qlims): components must change the answer")
             }
-            let fa = FastDecoupledSolver().solve(net, options: PowerFlowOptions(tolerancePu: 1e-8))
-            let fb = FastDecoupledSolver().solve(z, options: PowerFlowOptions(tolerancePu: 1e-8))
-            assertBitIdentical(fa, fb, "\(name) FDPF")
+            let fa = FastDecoupledSolver().solve(net, options: PowerFlowOptions(tolerancePu: 1e-8, maxIterations: 200))
+            let fb = FastDecoupledSolver().solve(z, options: PowerFlowOptions(tolerancePu: 1e-8, maxIterations: 200))
+            XCTAssertTrue(fa.converged && fb.converged, name)
+            XCTAssertGreaterThan(moved(fa, fb), 1e-6, "\(name) FDPF")
             let da = DCPowerFlowSolver().solve(net, options: PowerFlowOptions())
             let db = DCPowerFlowSolver().solve(z, options: PowerFlowOptions())
             assertBitIdentical(da, db, "\(name) DC")
-            var opts = PowerFlowOptions(enforceQLimits: true)
-            opts.method = .fastDecoupledWarmStart
-            opts.autoFallback = true
-            let ea = PowerFlowEngine().solve(net, options: opts)
-            let eb = PowerFlowEngine().solve(z, options: opts)
-            assertBitIdentical(ea, eb, "\(name) engine warm-start")
-            XCTAssertEqual(ea.solutionPath, eb.solutionPath, name)
         }
     }
 
-    /// The sweep carries components per step and applies them; with the
-    /// components riding along, a sweep over a component-carrying network is
-    /// bit-identical to the same sweep over the plain one.
-    func testSweepIsInertToComponents() throws {
+    /// The sweep carries components per step and applies them; now that the
+    /// solvers read them, a sweep over a component-carrying network is a
+    /// DIFFERENT sweep from the plain one at every step (and converges).
+    func testSweepReadsComponents() throws {
         let net = try ReferenceCase.load("case14").network()
         let z = withComponents(net)
         func steps(_ n: BusBranchNetwork) -> [LoadStep] {
@@ -122,10 +124,9 @@ final class LoadComponentsTests: XCTestCase {
         let b = TimeSeriesSweep().run(base: z, steps: steps(z), options: PowerFlowOptions(enforceQLimits: true))
         XCTAssertEqual(a.count, b.count)
         for (x, y) in zip(a, b) {
-            XCTAssertEqual(x.converged, y.converged)
-            XCTAssertEqual(x.iterations, y.iterations)
-            XCTAssertEqual(x.vmPu.map(\.bitPattern), y.vmPu.map(\.bitPattern))
-            XCTAssertEqual(x.vaRad.map(\.bitPattern), y.vaRad.map(\.bitPattern))
+            XCTAssertTrue(x.converged && y.converged)
+            let dv = zip(x.vmPu, y.vmPu).map { abs($0 - $1) }.max() ?? 0
+            XCTAssertGreaterThan(dv, 1e-6, "a component-carrying step must solve to a different answer")
         }
     }
 

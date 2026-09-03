@@ -415,6 +415,18 @@ public struct FastDecoupledSolver: PowerFlowSolver {
         }
 
         // Scaled mismatches (pypower fdpf: mis = (S(V) − Sspec) / Vm).
+        //
+        // ZIP (D80 step 4b, exploration §3.4) — MISMATCH-ONLY, deliberately:
+        // the load is re-evaluated at the current magnitude here, and B″ is
+        // NOT given the load linearization. FDPF is a fixed-point iteration on
+        // the mismatch, so its converged point is whatever zeroes this — the
+        // ZIP answer — while B′/B″ stay topology-only and the
+        // `FDPFFactorizationCache` key (which excludes load by design) keeps
+        // load-only sweeps refactorization-free. The price is round count on
+        // a heavy-Z network, measured in `ZIPSolveTests`, not assumed.
+        let zip = ZIPLoad(net)
+        let pGen: [Double] = zip.on ? (0..<n).map { pSpec[$0] + (zip.pP[$0] + zip.pI[$0] + zip.pZ[$0]) } : []
+        let qGen: [Double] = zip.on ? (0..<n).map { qSpec[$0] + (zip.qP[$0] + zip.qI[$0] + zip.qZ[$0]) } : []
         var mP = [Double](repeating: 0, count: pvpq.count)
         var mQ = [Double](repeating: 0, count: pq.count)
         var normP = 0.0, normQ = 0.0
@@ -422,11 +434,13 @@ public struct FastDecoupledSolver: PowerFlowSolver {
             computeInjections()
             normP = 0; normQ = 0
             for (r, bus) in pvpq.enumerated() {
-                mP[r] = (pCalc[bus] - pSpec[bus]) / vm[bus]
+                let spec = zip.on ? pGen[bus] - zip.p(bus, vm[bus]) : pSpec[bus]
+                mP[r] = (pCalc[bus] - spec) / vm[bus]
                 normP = max(normP, abs(mP[r]))
             }
             for (r, bus) in pq.enumerated() {
-                mQ[r] = (qCalc[bus] - qSpec[bus]) / vm[bus]
+                let spec = zip.on ? qGen[bus] - zip.q(bus, vm[bus]) : qSpec[bus]
+                mQ[r] = (qCalc[bus] - spec) / vm[bus]
                 normQ = max(normQ, abs(mQ[r]))
             }
         }
@@ -517,18 +531,32 @@ public struct FastDecoupledSolver: PowerFlowSolver {
                                   pToPu: st.re, qToPu: st.im)
         }
 
+        // ZIP (D80 step 4b): the post-solve reads use the load at the SOLVED
+        // magnitude — a PV or slack bus's setpoint — under the same rule as
+        // `NewtonRaphsonSolver` (exploration §3.2, the PV-bus trap).
+        let zip = ZIPLoad(net)
         var genP = [Double](repeating: 0, count: net.generators.count)
         var genQ = [Double](repeating: 0, count: net.generators.count)
         for i in 0..<n where !state.gensAtBus[i].isEmpty && state.live[i] {
             let gens = state.gensAtBus[i]
-            let qTotal = state.qCalc[i] + net.buses[i].qLoadPu
+            let qLoadHere = zip.on ? zip.q(i, state.vm[i]) : net.buses[i].qLoadPu
+            let qTotal = state.qCalc[i] + qLoadHere
             for g in gens { genQ[g] = qTotal / Double(gens.count) }
             if state.isSlack[i] {
-                let pTotal = state.pCalc[i] + net.buses[i].pLoadPu
+                let pLoadHere = zip.on ? zip.p(i, state.vm[i]) : net.buses[i].pLoadPu
+                let pTotal = state.pCalc[i] + pLoadHere
                 for g in gens { genP[g] = pTotal / Double(gens.count) }
             } else {
                 for g in gens { genP[g] = net.generators[g].pPu }
             }
+        }
+        let loadP: [Double], loadQ: [Double]
+        if zip.on {
+            loadP = (0..<n).map { state.live[$0] ? zip.p($0, state.vm[$0]) : net.buses[$0].pLoadPu }
+            loadQ = (0..<n).map { state.live[$0] ? zip.q($0, state.vm[$0]) : net.buses[$0].qLoadPu }
+        } else {
+            loadP = net.buses.map(\.pLoadPu)
+            loadQ = net.buses.map(\.qLoadPu)
         }
 
         return PowerFlowSolution(
@@ -539,9 +567,7 @@ public struct FastDecoupledSolver: PowerFlowSolver {
             stages: [SolveStage(kind: .fdpf, iterations: state.rounds,
                                 converged: true,
                                 finalMismatchPu: state.finalMismatchPu)],
-            // D80: consumed ≡ scheduled until a solver evaluates ZIP.
-            loadPPu: net.buses.map(\.pLoadPu),
-            loadQPu: net.buses.map(\.qLoadPu))
+            loadPPu: loadP, loadQPu: loadQ)
     }
 
     private func failed(_ net: BusBranchNetwork, reason: String,

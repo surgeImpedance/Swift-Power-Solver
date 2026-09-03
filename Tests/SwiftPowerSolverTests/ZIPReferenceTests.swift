@@ -36,13 +36,21 @@ struct ZIPReference: Decodable {
             case scheduledPMw = "scheduled_p_mw", scheduledQMvar = "scheduled_q_mvar"
         }
     }
+    struct Flow: Decodable {
+        var pfMw: Double, qfMvar: Double, ptMw: Double, qtMvar: Double
+        enum CodingKeys: String, CodingKey {
+            case pfMw = "pf_mw", qfMvar = "qf_mvar", ptMw = "pt_mw", qtMvar = "qt_mvar"
+        }
+    }
     struct Solution: Decodable {
         var vmPu: [Double], vaDeg: [Double], genPMw: [Double], genQMvar: [Double]
         var iterations: Int, busType: [Int]
+        var branchFlows: [Flow]?
         var consumedLoad: ConsumedLoad?
         enum CodingKeys: String, CodingKey {
             case vmPu = "vm_pu", vaDeg = "va_deg", genPMw = "gen_p_mw", genQMvar = "gen_q_mvar"
             case iterations, busType = "bus_type", consumedLoad = "consumed_load"
+            case branchFlows = "branch_flows"
         }
     }
     struct Case: Decodable {
@@ -65,6 +73,32 @@ struct ZIPReference: Decodable {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "zip", withExtension: "json",
                                                   subdirectory: "Reference"))
         return try JSONDecoder().decode(ZIPReference.self, from: Data(contentsOf: url))
+    }
+}
+
+/// MATPOWER 8.0's ZIP answers on IDENTICAL data (`Reference/zip_matpower.json`)
+/// — the Q-limits-ON oracle, because pandapower's `pfsoln` reconstructs
+/// generator Q from the SCHEDULED load column (`_update_q`: `bus[:, QD]`) and
+/// so carries the PV-bus trap under voltage-dependent loads (its case118 ZIP
+/// q_lims block pins nothing; MATPOWER and the Swift solvers pin eight).
+/// Also the full-Newton iteration-count reference.
+struct ZIPMatpowerReference: Decodable {
+    struct Run: Decodable {
+        var vmPu: [Double], vaDeg: [Double], iterations: Int
+        var gensAtAQLimitBus0: [Int]
+        enum CodingKeys: String, CodingKey {
+            case vmPu = "vm_pu", vaDeg = "va_deg", iterations
+            case gensAtAQLimitBus0 = "gens_at_a_q_limit_bus0"
+        }
+    }
+    var tool: String
+    var data: String
+    var cases: [String: [String: Run]]
+
+    static func load() throws -> ZIPMatpowerReference {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "zip_matpower", withExtension: "json",
+                                                  subdirectory: "Reference"))
+        return try JSONDecoder().decode(ZIPMatpowerReference.self, from: Data(contentsOf: url))
     }
 }
 

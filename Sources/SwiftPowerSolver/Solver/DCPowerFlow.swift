@@ -10,6 +10,11 @@ import Foundation
 // series reactance only), small angle differences. The active-power balance
 // reduces to a single linear system  B'·θ = Pinj  solved once (no iteration).
 //
+// ZIP loads (D80) are a NO-OP here by construction: at V ≡ 1 every ZIP
+// polynomial evaluates to its constant-power total, so `Bus.pLoadPu` is the
+// right (and only) load this solver reads. Deliberately no ZIP code in this
+// file; `loadPPu` reports the V = 1 value, which is the consumed value here.
+//
 //   b_k   = 1 / (x_k · tap_k)                 branch DC susceptance
 //   B'    : Σ b_k on the diagonal of each end, −b_k off-diagonal (from/to)
 //   Pfinj_k = −b_k · shift_k                  phase-shifter power injection

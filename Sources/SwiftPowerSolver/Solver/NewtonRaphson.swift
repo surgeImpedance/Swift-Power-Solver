@@ -142,6 +142,19 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         }
         rebuildPSpec()
 
+        // --- ZIP load (D80 step 4b) -----------------------------------------
+        // Read ONCE here. `zip.on == false` is every network that predates the
+        // components: every read below is guarded by it and the constant-power
+        // path runs unchanged. On the ZIP path the load is re-evaluated at the
+        // current magnitude inside each iteration (see the iterators), and
+        // the four reads outside the iteration — the Q-limit check and the
+        // post-solve reconstructions — evaluate it at the bus's magnitude,
+        // which at a PV bus is its setpoint: `P_L(V_set)`, not `pLoadPu`,
+        // whenever `V_set ≠ 1` (exploration §3.2, the PV-bus trap). The
+        // distributed-slack initial guess below stays `Σ pLoadPu`: it is a
+        // guess at V = 1, where the polynomial equals the total exactly.
+        let zip = ZIPLoad(net)
+
         // --- initial voltage (flat start, gen setpoints) ---------------------
         // Angles start at the slack reference (usually 0; case118 pins 30°),
         // and the slack buses hold theirs for the whole solve.
@@ -249,12 +262,12 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                     ybus: ybus, pSpec: pSpec, qSpec: qSpecNow,
                     pv: pv, pq: pq, angleRef: angleRef, swBus: swBus,
                     vm: &vm, va: &va, slack: &slack,
-                    pCalc: &pCalc, qCalc: &qCalc, options: options)
+                    pCalc: &pCalc, qCalc: &qCalc, options: options, zip: zip)
             } else {
                 inner = newtonIterate(
                     ybus: ybus, pSpec: pSpec, qSpec: qSpecNow,
                     pv: pv, pq: pq, vm: &vm, va: &va,
-                    pCalc: &pCalc, qCalc: &qCalc, options: options)
+                    pCalc: &pCalc, qCalc: &qCalc, options: options, zip: zip)
             }
             totalIterations += inner.iterations
             guard inner.converged else {
@@ -334,8 +347,10 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             for i in pv {
                 let unpinned = gensAtBus[i].filter { !pinnedGens.contains($0) }
                 guard !unpinned.isEmpty else { continue }
-                // Q the unpinned gens must supply together.
-                let qNeeded = qCalc[i] + net.buses[i].qLoadPu - pinnedQAtBus[i]
+                // Q the unpinned gens must supply together. ZIP: the load at a
+                // PV bus is Q_L(V_set) — its magnitude is pinned at `vm[i]`.
+                let qLoadHere = zip.on ? zip.q(i, vm[i]) : net.buses[i].qLoadPu
+                let qNeeded = qCalc[i] + qLoadHere - pinnedQAtBus[i]
                 let qMin = unpinned.reduce(0) { $0 + net.generators[$1].qMinPu }
                 let qMax = unpinned.reduce(0) { $0 + net.generators[$1].qMaxPu }
                 if qNeeded > qMax {
@@ -390,7 +405,10 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 genQ[g] = pinnedQOfGen[g] ?? 0
             }
             if !unpinned.isEmpty {
-                let qRemaining = qCalc[i] + net.buses[i].qLoadPu - pinnedQAtBus[i]
+                // ZIP: the load absorbed at the SOLVED magnitude (a PV bus's
+                // setpoint; a switched bus's solved value).
+                let qLoadHere = zip.on ? zip.q(i, vm[i]) : net.buses[i].qLoadPu
+                let qRemaining = qCalc[i] + qLoadHere - pinnedQAtBus[i]
                 for g in unpinned { genQ[g] = qRemaining / Double(unpinned.count) }
             }
             // Active: distributed slack shares the imbalance by weight —
@@ -404,11 +422,26 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             if distributed {
                 for g in gens { genP[g] = effectiveP[g] - swGen[g] * slack }
             } else if isSlack[i] {
-                let pTotal = pCalc[i] + net.buses[i].pLoadPu
+                // ZIP: the slack holds V_set; its load is P_L(V_set).
+                let pLoadHere = zip.on ? zip.p(i, vm[i]) : net.buses[i].pLoadPu
+                let pTotal = pCalc[i] + pLoadHere
                 for g in gens { genP[g] = pTotal / Double(gens.count) }
             } else {
                 for g in gens { genP[g] = net.generators[g].pPu }
             }
+        }
+
+        // Consumed load at the solved magnitude (D80). Constant-power path:
+        // the scheduled value, unchanged. ZIP path: the polynomial at the
+        // solved `vm`; a de-energized bus keeps the scheduled value (its
+        // magnitude is NaN and it consumed nothing the solve can attest to).
+        let loadP: [Double], loadQ: [Double]
+        if zip.on {
+            loadP = (0..<n).map { live[$0] ? zip.p($0, vm[$0]) : net.buses[$0].pLoadPu }
+            loadQ = (0..<n).map { live[$0] ? zip.q($0, vm[$0]) : net.buses[$0].qLoadPu }
+        } else {
+            loadP = net.buses.map(\.pLoadPu)
+            loadQ = net.buses.map(\.qLoadPu)
         }
 
         return PowerFlowSolution(
@@ -418,9 +451,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             pLimitedGenIndices: pPinnedGens,
             pSaturatedGenIndices: pSaturatedGens,
             qLimitRestarts: qLimitRestartCount,
-            // D80: consumed ≡ scheduled until a solver evaluates ZIP.
-            loadPPu: net.buses.map(\.pLoadPu),
-            loadQPu: net.buses.map(\.qLoadPu))
+            loadPPu: loadP, loadQPu: loadQ)
     }
 
     // MARK: - Inner Newton iteration
@@ -439,7 +470,8 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         pv: [Int], pq: [Int],
         vm: inout [Double], va: inout [Double],
         pCalc: inout [Double], qCalc: inout [Double],
-        options: PowerFlowOptions
+        options: PowerFlowOptions,
+        zip: ZIPLoad
     ) -> InnerResult {
         let n = ybus.n
         let pvpq = pv + pq
@@ -452,6 +484,14 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         for (r, bus) in pvpq.enumerated() { thetaIndex[bus] = r }
         var vmIndex = [Int](repeating: -1, count: n)     // in 0..<npq
         for (r, bus) in pq.enumerated() { vmIndex[bus] = r }
+
+        // D80 step 4b (ZIP path only): the generator part of the spec —
+        // `pSpec + pLoadPu` — is constant across iterations; the load part is
+        // re-evaluated at the current magnitude by `computeInjections`.
+        let pGen: [Double] = zip.on ? (0..<n).map { pSpec[$0] + (zip.pP[$0] + zip.pI[$0] + zip.pZ[$0]) } : []
+        let qGen: [Double] = zip.on ? (0..<n).map { qSpec[$0] + (zip.qP[$0] + zip.qI[$0] + zip.qZ[$0]) } : []
+        var pLoadV = [Double](repeating: 0, count: zip.on ? n : 0)
+        var qLoadV = [Double](repeating: 0, count: zip.on ? n : 0)
 
         func computeInjections() {
             for i in 0..<n {
@@ -467,20 +507,28 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 pCalc[i] = vm[i] * p
                 qCalc[i] = vm[i] * q
             }
+            if zip.on {
+                for i in 0..<n {
+                    pLoadV[i] = zip.p(i, vm[i])
+                    qLoadV[i] = zip.q(i, vm[i])
+                }
+            }
         }
 
         for iteration in 0...options.maxIterations {
             computeInjections()
 
-            // Mismatch F = calc - spec.
+            // Mismatch F = calc - spec. ZIP: spec = generation − P_L(V).
             var f = [Double](repeating: 0, count: dim)
             var normF = 0.0
             for (r, bus) in pvpq.enumerated() {
-                f[r] = pCalc[bus] - pSpec[bus]
+                f[r] = zip.on ? pCalc[bus] - (pGen[bus] - pLoadV[bus])
+                              : pCalc[bus] - pSpec[bus]
                 normF = max(normF, abs(f[r]))
             }
             for (r, bus) in pq.enumerated() {
-                f[npvpq + r] = qCalc[bus] - qSpec[bus]
+                f[npvpq + r] = zip.on ? qCalc[bus] - (qGen[bus] - qLoadV[bus])
+                                      : qCalc[bus] - qSpec[bus]
                 normF = max(normF, abs(f[npvpq + r]))
             }
             if normF < options.tolerancePu {
@@ -516,6 +564,12 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                         dPdV = pCalc[i] / vm[i] + g * vm[i]
                         dQdT = pCalc[i] - g * vm[i] * vm[i]
                         dQdV = qCalc[i] / vm[i] - b * vm[i]
+                        if zip.on {
+                            // ZIP (§3.2): ∂P_L/∂V and ∂Q_L/∂V on the diagonal
+                            // only, unscaled-ΔV form. No new non-zeros.
+                            dPdV += zip.dPdV(i, vm[i])
+                            dQdV += zip.dQdV(i, vm[i])
+                        }
                     } else {
                         let theta = va[i] - va[j]
                         let c = cos(theta), s = sin(theta)
@@ -561,13 +615,20 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         pv: [Int], pq: [Int], angleRef: Int, swBus: [Double],
         vm: inout [Double], va: inout [Double], slack: inout Double,
         pCalc: inout [Double], qCalc: inout [Double],
-        options: PowerFlowOptions
+        options: PowerFlowOptions,
+        zip: ZIPLoad
     ) -> InnerResult {
         let n = ybus.n
         let pvpq = pv + pq
         let npvpq = pvpq.count
         let npq = pq.count
         let dim = 1 + npvpq + npq                        // slack + θ_pvpq + Vm_pq
+
+        // D80 step 4b (ZIP path only) — same construction as `newtonIterate`.
+        let pGen: [Double] = zip.on ? (0..<n).map { pSpec[$0] + (zip.pP[$0] + zip.pI[$0] + zip.pZ[$0]) } : []
+        let qGen: [Double] = zip.on ? (0..<n).map { qSpec[$0] + (zip.qP[$0] + zip.qI[$0] + zip.qZ[$0]) } : []
+        var pLoadV = [Double](repeating: 0, count: zip.on ? n : 0)
+        var qLoadV = [Double](repeating: 0, count: zip.on ? n : 0)
 
         // Row / column maps. Column 0 is the slack scalar. P-equation rows:
         // 0 = angle reference, 1..npvpq = pvpq. θ columns: 1..npvpq (the angle
@@ -594,23 +655,40 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 pCalc[i] = vm[i] * p
                 qCalc[i] = vm[i] * q
             }
+            if zip.on {
+                for i in 0..<n {
+                    pLoadV[i] = zip.p(i, vm[i])
+                    qLoadV[i] = zip.q(i, vm[i])
+                }
+            }
         }
 
         for iteration in 0...options.maxIterations {
             computeInjections()
 
             // Mismatch: P rows carry the distributed slack term + sw·slack.
+            // ZIP: spec = generation − P_L(V), as in `newtonIterate`.
             var f = [Double](repeating: 0, count: dim)
             var normF = 0.0
             func setF(_ row: Int, _ value: Double) {
                 f[row] = value; normF = max(normF, abs(value))
             }
-            setF(0, pCalc[angleRef] - pSpec[angleRef] + swBus[angleRef] * slack)
-            for (r, bus) in pvpq.enumerated() {
-                setF(1 + r, pCalc[bus] - pSpec[bus] + swBus[bus] * slack)
-            }
-            for (r, bus) in pq.enumerated() {
-                setF(1 + npvpq + r, qCalc[bus] - qSpec[bus])
+            if zip.on {
+                setF(0, pCalc[angleRef] - (pGen[angleRef] - pLoadV[angleRef]) + swBus[angleRef] * slack)
+                for (r, bus) in pvpq.enumerated() {
+                    setF(1 + r, pCalc[bus] - (pGen[bus] - pLoadV[bus]) + swBus[bus] * slack)
+                }
+                for (r, bus) in pq.enumerated() {
+                    setF(1 + npvpq + r, qCalc[bus] - (qGen[bus] - qLoadV[bus]))
+                }
+            } else {
+                setF(0, pCalc[angleRef] - pSpec[angleRef] + swBus[angleRef] * slack)
+                for (r, bus) in pvpq.enumerated() {
+                    setF(1 + r, pCalc[bus] - pSpec[bus] + swBus[bus] * slack)
+                }
+                for (r, bus) in pq.enumerated() {
+                    setF(1 + npvpq + r, qCalc[bus] - qSpec[bus])
+                }
             }
             if normF < options.tolerancePu {
                 return InnerResult(converged: true, iterations: iteration, reason: nil)
@@ -648,6 +726,11 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                         dPdV = pCalc[i] / vm[i] + g * vm[i]
                         dQdT = pCalc[i] - g * vm[i] * vm[i]
                         dQdV = qCalc[i] / vm[i] - b * vm[i]
+                        if zip.on {
+                            // ZIP (§3.2): diagonal only, unscaled-ΔV form.
+                            dPdV += zip.dPdV(i, vm[i])
+                            dQdV += zip.dQdV(i, vm[i])
+                        }
                     } else {
                         let theta = va[i] - va[j]
                         let c = cos(theta), s = sin(theta)
