@@ -22,6 +22,23 @@ import Foundation
 /// The derivative used on the Jacobian diagonal is the UNSCALED `∂/∂|V|`
 /// form, `pI + 2·pZ·V`, matching this solver's ΔV unknown (§3.2) — not
 /// MATPOWER's `Vm`-scaled form.
+///
+/// EVALUATED ON |V| (D80 seventeenth sitting, "Option A"). A magnitude is a
+/// modulus, and the physical load knows nothing of its sign: a
+/// constant-current load draws current in proportion to |V|, a
+/// constant-impedance one to |V|². Polar Newton updates the magnitude
+/// additively and an iterate CAN cross zero; on the signed value the I term
+/// then flipped sign — the load injected — and the mismatch equations
+/// acquired roots the network does not have (`converged = true` at
+/// −0.33 pu, measured, sixteenth sitting). On |V| every load term is even
+/// in V and its derivative odd, so the mismatch at (−V, θ) is the mismatch
+/// at (V, θ + π) — the same phasor — and a negative iterate is a
+/// representation of a physical point, never a different equation. For a
+/// positive magnitude the arithmetic is the pre-edit expression bit for
+/// bit: |v| is v and the sign factor is exactly 1 (`OptionATests`, and the
+/// blast-radius probe over every reference arm). The negative-magnitude
+/// guard (`PowerFlowSolution.nonPhysicalMagnitude`) stays: a solution
+/// reported in the non-canonical representation is still refused.
 struct ZIPLoad {
     let on: Bool
     let pP: [Double], pI: [Double], pZ: [Double]
@@ -37,14 +54,22 @@ struct ZIPLoad {
         qP = net.buses.map { $0.qLoadPu - $0.qLoadZPu - $0.qLoadIPu }
     }
 
-    /// Load absorbed at bus `i` at magnitude `v`, pu. Only meaningful when `on`.
+    /// Load absorbed at bus `i` at magnitude `v`, pu — evaluated on |v|.
+    /// Only meaningful when `on`.
     @inline(__always) func p(_ i: Int, _ v: Double) -> Double {
-        pP[i] + pI[i] * v + pZ[i] * v * v
+        let m = abs(v)
+        return pP[i] + pI[i] * m + pZ[i] * m * m
     }
     @inline(__always) func q(_ i: Int, _ v: Double) -> Double {
-        qP[i] + qI[i] * v + qZ[i] * v * v
+        let m = abs(v)
+        return qP[i] + qI[i] * m + qZ[i] * m * m
     }
-    /// `∂P_L,i/∂V` and `∂Q_L,i/∂V` at magnitude `v` — the Jacobian diagonal terms.
-    @inline(__always) func dPdV(_ i: Int, _ v: Double) -> Double { pI[i] + 2 * pZ[i] * v }
-    @inline(__always) func dQdV(_ i: Int, _ v: Double) -> Double { qI[i] + 2 * qZ[i] * v }
+    /// `∂P_L,i/∂V` and `∂Q_L,i/∂V` at magnitude `v` — the Jacobian diagonal
+    /// terms: `sign(v)·(pI + 2·pZ·|v|)`, the derivative of the even polynomial.
+    @inline(__always) func dPdV(_ i: Int, _ v: Double) -> Double {
+        (v < 0 ? -1.0 : 1.0) * (pI[i] + 2 * pZ[i] * abs(v))
+    }
+    @inline(__always) func dQdV(_ i: Int, _ v: Double) -> Double {
+        (v < 0 ? -1.0 : 1.0) * (qI[i] + 2 * qZ[i] * abs(v))
+    }
 }
