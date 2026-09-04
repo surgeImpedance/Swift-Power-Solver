@@ -135,3 +135,31 @@ public struct PowerFlowSolution: Sendable {
 public protocol PowerFlowSolver {
     func solve(_ net: BusBranchNetwork, options: PowerFlowOptions) -> PowerFlowSolution
 }
+
+extension PowerFlowSolution {
+    /// THE NEGATIVE-MAGNITUDE GUARD (D80, seventeenth sitting) — the
+    /// post-condition every converged result passes through before it is
+    /// reported as one.
+    ///
+    /// Polar Newton (and FDPF's Q half) update |V| additively, and nothing
+    /// stops an iterate crossing zero. Below zero the ZIP polynomial was
+    /// evaluated on the SIGNED value, so a constant-current term flipped sign
+    /// and the mismatch equations acquired roots the network does not have —
+    /// the solver then reported `converged = true` at, e.g., −0.33 pu
+    /// (measured, sixteenth sitting: NR, FDPF and the engine alike). A
+    /// magnitude is a modulus; a negative one is not a representation of any
+    /// operating point this solver's equations describe, so the result is
+    /// reported as a failure with the offending bus and the iterate kept for
+    /// diagnosis. A pure post-condition: no converging case is touched.
+    ///
+    /// Returns the failure reason, or nil when every finite magnitude is
+    /// positive. Non-finite entries are de-energized buses and pass.
+    static func nonPhysicalMagnitude(_ vmPu: [Double]) -> String? {
+        let negative = vmPu.enumerated().filter { $0.element.isFinite && $0.element < 0 }
+        guard let first = negative.first else { return nil }
+        return String(format: "converged to a non-physical point: negative voltage magnitude "
+                      + "at %d bus(es) (bus %d, V = %.4f pu) — a root of the signed-magnitude "
+                      + "load polynomial, not of the network",
+                      negative.count, first.offset, first.element)
+    }
+}

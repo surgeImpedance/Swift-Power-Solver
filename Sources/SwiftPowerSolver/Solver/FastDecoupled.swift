@@ -559,13 +559,19 @@ public struct FastDecoupledSolver: PowerFlowSolver {
             loadQ = net.buses.map(\.qLoadPu)
         }
 
+        // The negative-magnitude guard (D80, seventeenth sitting): FDPF's Q
+        // half updates |V| additively too, and it reaches the same spurious
+        // roots Newton does (measured: BX at 1,100 MW on the two-bus
+        // reproducer, 138 rounds, −0.2969 pu). See
+        // `PowerFlowSolution.nonPhysicalMagnitude`.
+        let refusal = PowerFlowSolution.nonPhysicalMagnitude(vmOut)
         return PowerFlowSolution(
-            converged: true, failureReason: nil, iterations: state.rounds,
+            converged: refusal == nil, failureReason: refusal, iterations: state.rounds,
             vmPu: vmOut, vaRad: vaOut, branchFlows: flows,
             genPPu: genP, genQPu: genQ, pinnedGenIndices: [],
-            solutionPath: .fdpf,
+            solutionPath: refusal == nil ? .fdpf : .failed,
             stages: [SolveStage(kind: .fdpf, iterations: state.rounds,
-                                converged: true,
+                                converged: refusal == nil,
                                 finalMismatchPu: state.finalMismatchPu)],
             loadPPu: loadP, loadQPu: loadQ)
     }

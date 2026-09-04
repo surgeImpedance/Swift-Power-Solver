@@ -444,7 +444,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             loadQ = net.buses.map(\.qLoadPu)
         }
 
-        return PowerFlowSolution(
+        var solution = PowerFlowSolution(
             converged: true, failureReason: nil, iterations: totalIterations,
             vmPu: vmOut, vaRad: vaOut, branchFlows: flows,
             genPPu: genP, genQPu: genQ, pinnedGenIndices: pinnedGens,
@@ -452,6 +452,15 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             pSaturatedGenIndices: pSaturatedGens,
             qLimitRestarts: qLimitRestartCount,
             loadPPu: loadP, loadQPu: loadQ)
+        // The negative-magnitude guard (D80, seventeenth sitting): a
+        // converged mismatch at a negative |V| is not a solution of the
+        // network. Reported as a failure, iterate kept. See
+        // `PowerFlowSolution.nonPhysicalMagnitude`.
+        if let reason = PowerFlowSolution.nonPhysicalMagnitude(vmOut) {
+            solution.converged = false
+            solution.failureReason = reason
+        }
+        return solution
     }
 
     // MARK: - Inner Newton iteration
