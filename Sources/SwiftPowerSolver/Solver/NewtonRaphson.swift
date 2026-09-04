@@ -199,6 +199,8 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             return g - totalLoadPu
         }
         var slack = distributed ? slackGuess() : 0.0
+        // KCL at the last converged inner solve (eighteenth sitting).
+        var kclAtConvergence: (mismatch: Double, bus: Int) = (0, -1)
 
         // P-limit (regulating-range) state. Empty and inert unless a contributor
         // actually carries a finite limit that the distribution violates.
@@ -274,6 +276,7 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
                 return failed(net, reason: inner.reason ?? "did not converge",
                               iterations: totalIterations)
             }
+            kclAtConvergence = (inner.currentMismatch, inner.currentMismatchBus)
 
             var violations = false
 
@@ -460,6 +463,34 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             solution.converged = false
             solution.failureReason = reason
         }
+        // THE KCL POST-CONDITION (D80, eighteenth sitting, item a). The
+        // convergence test above is the infinity norm of the POWER mismatch,
+        // |ΔS| < tolerancePu — pandapower's and MATPOWER's shape. It is met
+        // trivially by a collapsing voltage: every injection at a bus scales
+        // with V, and so does every load term without a constant-power
+        // part (Z, I), so at V → 0 the power balance holds for ANY current
+        // imbalance — Kirchhoff's current law has left the equations.
+        // Measured: a pure-I load at 1,500 MW "converged" at 6.28e-12 pu, a
+        // pure-Z one through the engine's warm start at ~1e-13, both with a
+        // current mismatch of order 1 pu. The current mismatch, |ΔS|/V per
+        // row, is what the power mismatch stands in for; FDPF already tests
+        // exactly that (its mismatch is ΔP/V) and never reported a collapse.
+        // So: at the SAME tolerance, with no new parameter, a converged
+        // power mismatch whose current mismatch is not also under tolerance
+        // is refused, iterate kept. Never steers an iteration; on every
+        // recorded case the ratio |ΔS|/V ÷ tol at convergence is below 1
+        // (max 0.76 over the reference arms, 0.91 on case89pegase at 1e-12),
+        // so the blast radius on converging cases is the collapse family
+        // and the warm-start iterates that met power but not current
+        // tolerance — measured, see the register.
+        if solution.converged, kclAtConvergence.mismatch >= options.tolerancePu {
+            let b = kclAtConvergence.bus
+            solution.converged = false
+            solution.failureReason = String(format: "converged in power, not in current: max |ΔS|/V = %.3e pu "
+                                            + "at bus %d (V = %.3e pu) exceeds the tolerance %.1e — a collapsed "
+                                            + "bus satisfies the power mismatch trivially",
+                                            kclAtConvergence.mismatch, b, b >= 0 ? vm[b] : .nan, options.tolerancePu)
+        }
         return solution
     }
 
@@ -469,6 +500,12 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
         var converged: Bool
         var iterations: Int
         var reason: String?
+        /// KCL at the converged iterate: max over the mismatch rows of
+        /// |ΔS_row| / V_bus, pu — the current mismatch the power mismatch
+        /// stands in for — and the bus it peaks at. Meaningful only when
+        /// `converged`; the outer loop reads it as a post-condition.
+        var currentMismatch: Double = 0
+        var currentMismatchBus: Int = -1
     }
 
     /// Iterate to convergence for a fixed PV/PQ split. Updates vm/va in place
@@ -530,18 +567,26 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             // Mismatch F = calc - spec. ZIP: spec = generation − P_L(V).
             var f = [Double](repeating: 0, count: dim)
             var normF = 0.0
+            // KCL alongside (eighteenth sitting): the same rows divided by
+            // the bus magnitude. Read only at convergence; never steers.
+            var normI = 0.0, normIBus = -1
             for (r, bus) in pvpq.enumerated() {
                 f[r] = zip.on ? pCalc[bus] - (pGen[bus] - pLoadV[bus])
                               : pCalc[bus] - pSpec[bus]
                 normF = max(normF, abs(f[r]))
+                let i = abs(f[r]) / vm[bus]
+                if i > normI { normI = i; normIBus = bus }
             }
             for (r, bus) in pq.enumerated() {
                 f[npvpq + r] = zip.on ? qCalc[bus] - (qGen[bus] - qLoadV[bus])
                                       : qCalc[bus] - qSpec[bus]
                 normF = max(normF, abs(f[npvpq + r]))
+                let i = abs(f[npvpq + r]) / vm[bus]
+                if i > normI { normI = i; normIBus = bus }
             }
             if normF < options.tolerancePu {
-                return InnerResult(converged: true, iterations: iteration, reason: nil)
+                return InnerResult(converged: true, iterations: iteration, reason: nil,
+                                   currentMismatch: normI, currentMismatchBus: normIBus)
             }
             if iteration == options.maxIterations {
                 return InnerResult(converged: false, iterations: iteration,
@@ -679,28 +724,32 @@ public struct NewtonRaphsonSolver: PowerFlowSolver {
             // ZIP: spec = generation − P_L(V), as in `newtonIterate`.
             var f = [Double](repeating: 0, count: dim)
             var normF = 0.0
-            func setF(_ row: Int, _ value: Double) {
+            var normI = 0.0, normIBus = -1     // KCL alongside, as in `newtonIterate`
+            func setF(_ row: Int, _ value: Double, bus: Int) {
                 f[row] = value; normF = max(normF, abs(value))
+                let i = abs(value) / vm[bus]
+                if i > normI { normI = i; normIBus = bus }
             }
             if zip.on {
-                setF(0, pCalc[angleRef] - (pGen[angleRef] - pLoadV[angleRef]) + swBus[angleRef] * slack)
+                setF(0, pCalc[angleRef] - (pGen[angleRef] - pLoadV[angleRef]) + swBus[angleRef] * slack, bus: angleRef)
                 for (r, bus) in pvpq.enumerated() {
-                    setF(1 + r, pCalc[bus] - (pGen[bus] - pLoadV[bus]) + swBus[bus] * slack)
+                    setF(1 + r, pCalc[bus] - (pGen[bus] - pLoadV[bus]) + swBus[bus] * slack, bus: bus)
                 }
                 for (r, bus) in pq.enumerated() {
-                    setF(1 + npvpq + r, qCalc[bus] - (qGen[bus] - qLoadV[bus]))
+                    setF(1 + npvpq + r, qCalc[bus] - (qGen[bus] - qLoadV[bus]), bus: bus)
                 }
             } else {
-                setF(0, pCalc[angleRef] - pSpec[angleRef] + swBus[angleRef] * slack)
+                setF(0, pCalc[angleRef] - pSpec[angleRef] + swBus[angleRef] * slack, bus: angleRef)
                 for (r, bus) in pvpq.enumerated() {
-                    setF(1 + r, pCalc[bus] - pSpec[bus] + swBus[bus] * slack)
+                    setF(1 + r, pCalc[bus] - pSpec[bus] + swBus[bus] * slack, bus: bus)
                 }
                 for (r, bus) in pq.enumerated() {
-                    setF(1 + npvpq + r, qCalc[bus] - qSpec[bus])
+                    setF(1 + npvpq + r, qCalc[bus] - qSpec[bus], bus: bus)
                 }
             }
             if normF < options.tolerancePu {
-                return InnerResult(converged: true, iterations: iteration, reason: nil)
+                return InnerResult(converged: true, iterations: iteration, reason: nil,
+                                   currentMismatch: normI, currentMismatchBus: normIBus)
             }
             if iteration == options.maxIterations {
                 return InnerResult(converged: false, iterations: iteration,

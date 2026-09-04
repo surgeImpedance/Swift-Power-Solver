@@ -104,16 +104,23 @@ final class OptionATests: XCTestCase {
     /// inert; a floor would be a threshold, which this cycle does not tune.
     /// Recorded as a measurement, with the mechanism made visible: tighten
     /// the tolerance and the "solution" moves further toward zero.
+    ///
+    /// EIGHTEENTH SITTING: the collapse is now REFUSED by the KCL
+    /// post-condition (`KCLPostConditionTests`) — "converged in power, not
+    /// in current" — with the iterate kept, so the measurement below reads
+    /// the same magnitudes off the refused result. The finding stands; what
+    /// changed is that the solver no longer calls it a solution.
     func testThePureICollapseIsAToleranceArtifactNotAZero() {
         var vAtTolerance: [Double: Double] = [:]
         for tol in [1e-8, 1e-10, 1e-12] {
             let sol = NewtonRaphsonSolver().solve(pureI(1500), options: PowerFlowOptions(tolerancePu: tol, maxIterations: 60))
-            XCTAssertTrue(sol.converged, "tol \(tol): \(sol.failureReason ?? "")")
+            XCTAssertFalse(sol.converged, "tol \(tol): the collapse is refused")
+            XCTAssertTrue((sol.failureReason ?? "").contains("not in current"), sol.failureReason ?? "nil")
             let v = sol.vmPu[1]
             XCTAssertGreaterThan(v, 0, "tol \(tol): the collapsed magnitude is positive, never zero")
             XCTAssertLessThan(v, 1e-9, "tol \(tol): but it is a collapsed bus — \(v)")
             vAtTolerance[tol] = v
-            print("pure-I 1,500 MW at tolerance \(tol): converged \(sol.iterations) it, V = \(v) pu")
+            print("pure-I 1,500 MW at tolerance \(tol): power-converged \(sol.iterations) it, V = \(v) pu, refused")
         }
         XCTAssertLessThan(vAtTolerance[1e-12]!, vAtTolerance[1e-8]!, "tightening the tolerance drives the root toward zero — a tolerance artifact")
     }
